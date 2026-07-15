@@ -21,6 +21,11 @@ app = Flask(__name__)
 # Gemini APIキー（Replit Secrets: GEMINI_API_KEY）
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
+# 使用するGeminiモデル名
+# モデルが廃止されたら GEMINI_MODEL 環境変数で上書き可能
+# 利用可能モデルは python3 -c "from google import genai, os; [print(m.name) for m in genai.Client(api_key=os.environ['GEMINI_API_KEY']).models.list()]"
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+
 # Google サービスアカウント JSON の内容（Replit Secrets: GOOGLE_SERVICE_ACCOUNT_JSON）
 GOOGLE_SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
 
@@ -147,7 +152,7 @@ def analyze_image_with_gemini(image_bytes: bytes, mime_type: str) -> dict:
     image_part = types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
 
     response = client.models.generate_content(
-        model="gemini-1.5-flash",
+        model=GEMINI_MODEL,
         contents=[image_part, GEMINI_PROMPT],
     )
     full_text = response.text
