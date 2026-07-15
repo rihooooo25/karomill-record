@@ -328,9 +328,13 @@ def test_connection():
         result["success"] = True
         result["spreadsheet_title"] = spreadsheet.title
         result["tabs"] = sheet_titles
-    except Exception as e:
+    except gspread.exceptions.APIError as e:
         result["success"] = False
-        result["spreadsheet_error"] = repr(e)
+        result["spreadsheet_error"] = f"APIError: {e.response.status_code} - {e.response.json()}"
+    except Exception as e:
+        import traceback
+        result["success"] = False
+        result["spreadsheet_error"] = traceback.format_exc()
 
     return jsonify(result)
 
