@@ -390,7 +390,7 @@
       btnSend.disabled = selectedFiles.length === 0;
     }
 
-    // ── 送信（順番に1枚ずつ処理）───────────────
+    // ── 送信（全画像を1回のリクエストにまとめて送信）──────
     btnSend.addEventListener('click', async () => {
       if (selectedFiles.length === 0) return;
 
@@ -399,37 +399,40 @@
       geminiOut.style.display = 'none';
       btnReset.style.display = 'none';
 
-      const results = [];
-      const geminiTexts = [];
+      // 全サムネイルを「解析中」表示
+      selectedFiles.forEach((_, i) => {
+        const s = document.getElementById(`thumb-status-${i}`);
+        if (s) s.textContent = '⏳';
+      });
 
-      for (let i = 0; i < selectedFiles.length; i++) {
-        const { file } = selectedFiles[i];
-        const statusEl = document.getElementById(`thumb-status-${i}`);
-        if (statusEl) statusEl.textContent = '⏳ 解析中';
+      setLoading(true, `AI解析中… (${selectedFiles.length}枚まとめて処理)`);
 
-        setLoading(true, `AI解析中… (${i + 1}/${selectedFiles.length})`);
+      // 全画像を images[] として1リクエストにまとめる
+      const fd = new FormData();
+      selectedFiles.forEach(({ file }) => fd.append('images', file));
 
-        const fd = new FormData();
-        fd.append('image', file);
-
-        try {
-          const resp = await fetch('/upload', { method: 'POST', body: fd });
-          const json = await resp.json();
-          results.push(json);
-          if (json.gemini_text) geminiTexts.push(json.gemini_text);
-          if (statusEl) statusEl.textContent = json.success ? '✅' : '❌';
-        } catch (err) {
-          results.push({ success: false, error: 'ネットワークエラー: ' + err.message });
-          if (statusEl) statusEl.textContent = '❌';
-        }
+      let json;
+      try {
+        const resp = await fetch('/upload', { method: 'POST', body: fd });
+        json = await resp.json();
+      } catch (err) {
+        json = { success: false, error: 'ネットワークエラー: ' + err.message };
       }
 
       setLoading(false);
-      showResults(results);
 
-      if (geminiTexts.length) {
+      // 全サムネイルに結果を反映
+      const statusIcon = json.success ? '✅' : '❌';
+      selectedFiles.forEach((_, i) => {
+        const s = document.getElementById(`thumb-status-${i}`);
+        if (s) s.textContent = statusIcon;
+      });
+
+      showResults([json]);
+
+      if (json.gemini_text) {
         geminiOut.style.display = 'block';
-        geminiPre.textContent = geminiTexts.join('\n\n─────────────────\n\n');
+        geminiPre.textContent = json.gemini_text;
       }
     });
 

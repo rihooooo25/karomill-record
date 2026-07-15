@@ -145,16 +145,37 @@ def parse_record_date(date_str: str) -> date:
     return candidate
 
 
-def analyze_image_with_gemini(image_bytes: bytes, mime_type: str) -> dict:
-    """Gemini API に画像を送って解析結果を返す"""
+def analyze_images_with_gemini(image_list: list) -> dict:
+    """Gemini API に複数画像をまとめて1回で送って解析結果を返す。
+    image_list: [(bytes, mime_type), ...]
+    レート制限時は指数バックオフでリトライ（最大3回）。
+    """
+    import time
+
     client = genai.Client(api_key=GEMINI_API_KEY)
 
-    image_part = types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
+    # 全画像を1つのリクエストにまとめる（APIコール1回 = レート制限対策）
+    parts = [types.Part.from_bytes(data=b, mime_type=m) for b, m in image_list]
+    parts.append(GEMINI_PROMPT)
 
-    response = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=[image_part, GEMINI_PROMPT],
-    )
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=parts,
+            )
+            break  # 成功したらループを抜ける
+        except Exception as e:
+            err_str = str(e)
+            # レート制限 (429) は待ってリトライ
+            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                if attempt < max_retries - 1:
+                    wait = 15 * (attempt + 1)  # 15秒 → 30秒 → 45秒
+                    time.sleep(wait)
+                    continue
+            raise  # それ以外のエラーはそのまま再送出
+
     full_text = response.text
 
     # JSON 部分を抽出
@@ -163,7 +184,6 @@ def analyze_image_with_gemini(image_bytes: bytes, mime_type: str) -> dict:
         raise ValueError("Gemini の応答から JSON を抽出できませんでした。\n\n" + full_text)
 
     extracted = json.loads(json_match.group(1).strip())
-    # フォーマット済みテキストも保持
     gemini_text = full_text[:full_text.find("<<<JSON_START>>>")].strip()
     extracted["_gemini_text"] = gemini_text
     return extracted
@@ -263,22 +283,21 @@ def index():
 
 @app.route("/upload", methods=["POST"])
 def upload():
-    if "image" not in request.files:
-        return jsonify({"success": False, "error": "画像ファイルが選択されていません。"}), 400
+    # 複数ファイル（images[]）または単一ファイル（image）を受け付ける
+    files = request.files.getlist("images") or request.files.getlist("image")
+    files = [f for f in files if f and f.filename != ""]
 
-    file = request.files["image"]
-    if file.filename == "":
-        return jsonify({"success": False, "error": "ファイル名が空です。"}), 400
+    if not files:
+        return jsonify({"success": False, "error": "画像ファイルが選択されていません。"}), 400
 
     if not GEMINI_API_KEY:
         return jsonify({"success": False, "error": "GEMINI_API_KEY が設定されていません。Secretsを確認してください。"}), 500
 
-    image_bytes = file.read()
-    mime_type = file.content_type or "image/jpeg"
+    image_list = [(f.read(), f.content_type or "image/jpeg") for f in files]
 
-    # Gemini 解析
+    # 全画像を1回のGemini APIコールで解析（レート制限対策）
     try:
-        data = analyze_image_with_gemini(image_bytes, mime_type)
+        data = analyze_images_with_gemini(image_list)
     except Exception as e:
         return jsonify({"success": False, "error": f"AI解析エラー: {str(e)}"}), 500
 
