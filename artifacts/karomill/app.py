@@ -28,7 +28,7 @@ GOOGLE_SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
 SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1z9PX6D_zbd1fhDDATzOOZNlLd3Ux1eMchoDBrMi7qCA/edit"
 
 # 1週目の開始月曜日（必要に応じてここを書き換えてください）
-START_DATE = date(2026, 2, 16)  # 例: 2026-02-16
+START_DATE = date(2026, 3, 31)  # 2週目が4/7のため、1週目開始=3/31
 
 # ─────────────────────────────────────────────
 # Gemini プロンプト
