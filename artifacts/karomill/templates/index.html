@@ -95,30 +95,59 @@
       margin-top: 4px;
     }
 
-    /* プレビュー */
+    /* プレビュー（複数サムネイル） */
     #preview-wrap {
       margin-top: 16px;
       display: none;
-      position: relative;
     }
-    #preview-img {
-      width: 100%;
-      border-radius: 10px;
-      max-height: 240px;
+    #preview-grid {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .thumb-item {
+      position: relative;
+      width: calc(33.3% - 6px);
+      aspect-ratio: 1;
+    }
+    .thumb-item img {
+      width: 100%; height: 100%;
       object-fit: cover;
+      border-radius: 8px;
       display: block;
     }
-    #preview-clear {
+    .thumb-item .thumb-remove {
       position: absolute;
-      top: 8px; right: 8px;
-      background: rgba(0,0,0,0.6);
+      top: 4px; right: 4px;
+      background: rgba(0,0,0,0.65);
       color: #fff;
       border: none;
       border-radius: 50%;
-      width: 28px; height: 28px;
-      font-size: 16px;
+      width: 22px; height: 22px;
+      font-size: 13px;
       cursor: pointer;
       display: flex; align-items: center; justify-content: center;
+      line-height: 1;
+    }
+    .thumb-item .thumb-status {
+      position: absolute;
+      bottom: 4px; left: 4px; right: 4px;
+      background: rgba(0,0,0,0.65);
+      color: #fff;
+      font-size: 10px;
+      text-align: center;
+      border-radius: 4px;
+      padding: 2px 4px;
+    }
+    #preview-clear-all {
+      margin-top: 8px;
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      font-size: 12px;
+      cursor: pointer;
+      text-decoration: underline;
+      padding: 0;
     }
 
     /* 送信ボタン */
@@ -248,16 +277,16 @@
 
     <!-- 画像選択 -->
     <div class="upload-zone" id="upload-zone">
-      <input type="file" id="file-input" accept="image/*"  />
+      <input type="file" id="file-input" accept="image/*" multiple />
       <span class="icon">📷</span>
-      <span class="label">スクショを選択 / カメラ起動</span>
+      <span class="label">スクショを選択（複数可）</span>
       <span class="sub">カロミルの食事・体重スクリーンショット</span>
     </div>
 
-    <!-- プレビュー -->
+    <!-- プレビュー（複数サムネイル） -->
     <div id="preview-wrap">
-      <img id="preview-img" src="" alt="プレビュー" />
-      <button id="preview-clear" title="クリア">✕</button>
+      <div id="preview-grid"></div>
+      <button id="preview-clear-all">すべてクリア</button>
     </div>
 
     <!-- 送信ボタン -->
@@ -284,35 +313,36 @@
   </div>
 
   <script>
-    const fileInput   = document.getElementById('file-input');
-    const uploadZone  = document.getElementById('upload-zone');
-    const previewWrap = document.getElementById('preview-wrap');
-    const previewImg  = document.getElementById('preview-img');
-    const previewClear= document.getElementById('preview-clear');
-    const btnSend     = document.getElementById('btn-send');
-    const loading     = document.getElementById('loading');
-    const loadingText = document.getElementById('loading-text');
-    const resultDiv   = document.getElementById('result');
-    const geminiOut   = document.getElementById('gemini-output');
-    const geminiPre   = document.getElementById('gemini-pre');
-    const btnReset    = document.getElementById('btn-reset');
+    const fileInput     = document.getElementById('file-input');
+    const uploadZone    = document.getElementById('upload-zone');
+    const previewWrap   = document.getElementById('preview-wrap');
+    const previewGrid   = document.getElementById('preview-grid');
+    const previewClearAll = document.getElementById('preview-clear-all');
+    const btnSend       = document.getElementById('btn-send');
+    const loading       = document.getElementById('loading');
+    const loadingText   = document.getElementById('loading-text');
+    const resultDiv     = document.getElementById('result');
+    const geminiOut     = document.getElementById('gemini-output');
+    const geminiPre     = document.getElementById('gemini-pre');
+    const btnReset      = document.getElementById('btn-reset');
 
-    let selectedFile = null;
+    // 選択ファイル一覧 [{file, objectUrl}]
+    let selectedFiles = [];
+
+    // ── ファイル追加 ──────────────────────────
+    function addFiles(newFiles) {
+      for (const f of newFiles) {
+        if (!f.type.startsWith('image/')) continue;
+        selectedFiles.push({ file: f, objectUrl: URL.createObjectURL(f) });
+      }
+      renderThumbs();
+      updateSendBtn();
+    }
 
     fileInput.addEventListener('change', e => {
-      const file = e.target.files[0];
-      if (!file) return;
-      selectedFile = file;
-      const url = URL.createObjectURL(file);
-      previewImg.src = url;
-      previewWrap.style.display = 'block';
-      btnSend.disabled = false;
-      resultDiv.style.display = 'none';
-      geminiOut.style.display = 'none';
-      btnReset.style.display = 'none';
+      addFiles(Array.from(e.target.files));
+      fileInput.value = ''; // 同じファイルを再選択できるようリセット
     });
-
-    previewClear.addEventListener('click', reset);
 
     uploadZone.addEventListener('dragover', e => {
       e.preventDefault();
@@ -322,75 +352,128 @@
     uploadZone.addEventListener('drop', e => {
       e.preventDefault();
       uploadZone.classList.remove('drag-over');
-      const file = e.dataTransfer.files[0];
-      if (file) { fileInput.files = e.dataTransfer.files; fileInput.dispatchEvent(new Event('change')); }
+      addFiles(Array.from(e.dataTransfer.files));
     });
 
+    // ── サムネイル描画 ───────────────────────
+    function renderThumbs() {
+      previewGrid.innerHTML = '';
+      selectedFiles.forEach((item, idx) => {
+        const wrap = document.createElement('div');
+        wrap.className = 'thumb-item';
+        wrap.innerHTML = `
+          <img src="${item.objectUrl}" alt="画像${idx+1}" />
+          <button class="thumb-remove" data-idx="${idx}" title="削除">✕</button>
+          <span class="thumb-status" id="thumb-status-${idx}"></span>`;
+        previewGrid.appendChild(wrap);
+      });
+      previewWrap.style.display = selectedFiles.length ? 'block' : 'none';
+      resultDiv.style.display = 'none';
+      geminiOut.style.display = 'none';
+      btnReset.style.display = 'none';
+
+      // 削除ボタン
+      previewGrid.querySelectorAll('.thumb-remove').forEach(btn => {
+        btn.addEventListener('click', e => {
+          const i = parseInt(e.currentTarget.dataset.idx);
+          URL.revokeObjectURL(selectedFiles[i].objectUrl);
+          selectedFiles.splice(i, 1);
+          renderThumbs();
+          updateSendBtn();
+        });
+      });
+    }
+
+    previewClearAll.addEventListener('click', reset);
+
+    function updateSendBtn() {
+      btnSend.disabled = selectedFiles.length === 0;
+    }
+
+    // ── 送信（順番に1枚ずつ処理）───────────────
     btnSend.addEventListener('click', async () => {
-      if (!selectedFile) return;
-      setLoading(true, 'AI解析中...');
+      if (selectedFiles.length === 0) return;
 
-      const fd = new FormData();
-      fd.append('image', selectedFile);
+      btnSend.disabled = true;
+      resultDiv.style.display = 'none';
+      geminiOut.style.display = 'none';
+      btnReset.style.display = 'none';
 
-      try {
-        const resp = await fetch('/upload', { method: 'POST', body: fd });
+      const results = [];
+      const geminiTexts = [];
 
-        setLoading(true, 'スプレッドシート書き込み中...');
-        await new Promise(r => setTimeout(r, 400)); // 視覚的フィードバック
+      for (let i = 0; i < selectedFiles.length; i++) {
+        const { file } = selectedFiles[i];
+        const statusEl = document.getElementById(`thumb-status-${i}`);
+        if (statusEl) statusEl.textContent = '⏳ 解析中';
 
-        const json = await resp.json();
-        setLoading(false);
-        showResult(json);
-      } catch (err) {
-        setLoading(false);
-        showResult({ success: false, error: 'ネットワークエラー: ' + err.message });
+        setLoading(true, `AI解析中… (${i + 1}/${selectedFiles.length})`);
+
+        const fd = new FormData();
+        fd.append('image', file);
+
+        try {
+          const resp = await fetch('/upload', { method: 'POST', body: fd });
+          const json = await resp.json();
+          results.push(json);
+          if (json.gemini_text) geminiTexts.push(json.gemini_text);
+          if (statusEl) statusEl.textContent = json.success ? '✅' : '❌';
+        } catch (err) {
+          results.push({ success: false, error: 'ネットワークエラー: ' + err.message });
+          if (statusEl) statusEl.textContent = '❌';
+        }
+      }
+
+      setLoading(false);
+      showResults(results);
+
+      if (geminiTexts.length) {
+        geminiOut.style.display = 'block';
+        geminiPre.textContent = geminiTexts.join('\n\n─────────────────\n\n');
       }
     });
 
     btnReset.addEventListener('click', reset);
 
+    // ── ローディング ─────────────────────────
     function setLoading(on, text) {
       loading.style.display = on ? 'block' : 'none';
       loadingText.textContent = text || '';
-      btnSend.disabled = on;
     }
 
-    function showResult(json) {
+    // ── 結果表示 ─────────────────────────────
+    function showResults(results) {
       resultDiv.style.display = 'block';
       btnReset.style.display = 'block';
 
-      if (json.success) {
-        resultDiv.innerHTML = `
-          <div class="result-box success">
-            <div class="result-title">✅ 記録完了！</div>
+      const html = results.map((json, i) => {
+        if (json.success) {
+          return `<div class="result-box success" style="margin-bottom:10px">
+            <div class="result-title">✅ 画像${i+1} 記録完了</div>
             <div>タブ: <strong>${json.tab}</strong></div>
             <div>日付: <strong>${json.date}</strong> / 体重: <strong>${json.weight} kg</strong></div>
-            <div class="result-detail">スプレッドシートへの書き込みが完了しました。</div>
           </div>`;
-      } else {
-        resultDiv.innerHTML = `
-          <div class="result-box error">
-            <div class="result-title">❌ エラー</div>
+        } else {
+          return `<div class="result-box error" style="margin-bottom:10px">
+            <div class="result-title">❌ 画像${i+1} エラー</div>
             <div>${escHtml(json.error || '不明なエラー')}</div>
           </div>`;
-      }
+        }
+      }).join('');
 
-      if (json.gemini_text) {
-        geminiOut.style.display = 'block';
-        geminiPre.textContent = json.gemini_text;
-      }
+      resultDiv.innerHTML = html;
     }
 
     function escHtml(s) {
-      return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
     }
 
     function reset() {
-      selectedFile = null;
+      selectedFiles.forEach(f => URL.revokeObjectURL(f.objectUrl));
+      selectedFiles = [];
       fileInput.value = '';
+      previewGrid.innerHTML = '';
       previewWrap.style.display = 'none';
-      previewImg.src = '';
       btnSend.disabled = true;
       resultDiv.style.display = 'none';
       geminiOut.style.display = 'none';
