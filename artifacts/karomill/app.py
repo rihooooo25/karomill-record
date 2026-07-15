@@ -22,19 +22,22 @@ app = Flask(__name__)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 # モデルフォールバックチェーン（先頭から順に試す）
-# 無料枠のクォータはモデルごと独立 → 1つが枯渇しても次へ自動切り替え
-# GEMINI_MODEL 環境変数でカスタム先頭モデルを指定可能
+# ・429（クォータ枯渇）→ 次のモデルへ
+# ・404（廃止・未提供）→ 次のモデルへ
+# ・gemini-2.5-* / gemini-1.5-* は新規ユーザー非提供のため除外済み
+# GEMINI_MODEL 環境変数で先頭モデルを差し替え可能
 _default_first = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
 GEMINI_MODEL_CHAIN = [
     _default_first,
-    "gemini-2.5-flash",
     "gemini-2.0-flash-lite",
-    "gemini-2.5-flash-lite",
-    "gemini-flash-latest",
+    "gemini-2.0-flash-001",
+    "gemini-3.1-flash-lite",
     "gemini-flash-lite-latest",
+    "gemini-3-flash-preview",
+    "gemini-3.5-flash",
 ]
 # 重複除去（先頭を維持）
-seen = set()
+seen: set = set()
 GEMINI_MODEL_CHAIN = [m for m in GEMINI_MODEL_CHAIN if not (m in seen or seen.add(m))]
 
 # Google サービスアカウント JSON の内容（Replit Secrets: GOOGLE_SERVICE_ACCOUNT_JSON）
@@ -156,9 +159,16 @@ def parse_record_date(date_str: str) -> date:
     return candidate
 
 
-def _is_daily_quota_error(err_str: str) -> bool:
-    """日次クォータ枯渇かどうかを判定（分次ではなく日次 = モデル変更が必要）"""
-    return "PerDay" in err_str or "limit: 0" in err_str
+def _is_skip_model_error(err_str: str) -> bool:
+    """このモデルを諦めて次へ切り替えるべきエラーかどうかを判定。
+    - 日次クォータ枯渇（429 PerDay / limit: 0）
+    - モデル非提供・廃止（404 not found / no longer available）
+    """
+    if "404" in err_str or "NOT_FOUND" in err_str or "no longer available" in err_str:
+        return True
+    if "PerDay" in err_str or "limit: 0" in err_str:
+        return True
+    return False
 
 
 def _parse_retry_delay(err_str: str) -> int:
@@ -215,7 +225,7 @@ def analyze_images_with_gemini(image_list: list) -> dict:
                 if not is_quota:
                     raise  # クォータ以外のエラーはそのまま送出
 
-                if _is_daily_quota_error(err_str):
+                if _is_skip_model_error(err_str):
                     # 日次枯渇 → このモデルは諦めて次へ
                     break
 
