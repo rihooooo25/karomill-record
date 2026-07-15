@@ -1,45 +1,43 @@
-# [Project name]
+# カロミル自動記録システム
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+カロミルの食事・体重スクショをアップロードすると、Gemini AIが解析してGoogleスプレッドシートへ自動書き込みするWebアプリ。
 
 ## Run & Operate
 
-- `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
-- `pnpm run typecheck` — full typecheck across all packages
-- `pnpm run build` — typecheck + build all packages
-- `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
-- `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- Required env: `DATABASE_URL` — Postgres connection string
+- `python3 artifacts/karomill/app.py` — Flask アプリ起動（ポート5000）
+- ワークフロー名: `カロミル記録アプリ`
 
 ## Stack
 
-- pnpm workspaces, Node.js 24, TypeScript 5.9
-- API: Express 5
-- DB: PostgreSQL + Drizzle ORM
-- Validation: Zod (`zod/v4`), `drizzle-zod`
-- API codegen: Orval (from OpenAPI spec)
-- Build: esbuild (CJS bundle)
+- Python 3.11 + Flask
+- Gemini API (`google-genai`) — 画像解析
+- gspread + oauth2client — Google Sheets書き込み
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- `artifacts/karomill/app.py` — メインFlaskアプリ（ルート・解析・書き込みロジック）
+- `artifacts/karomill/templates/index.html` — モバイル向けUI（シングルページ）
+- `artifacts/karomill/requirements.txt` — Python依存パッケージ
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
+- Gemini 1.5 Flash で画像→構造化JSON抽出（プロンプト末尾に `<<<JSON_START>>>` ブロック付与）
+- 基準日（`START_DATE`）から週番号を計算してタブを自動特定
+- Q列を全行スキャンして日付行を特定、相対オフセットでセル書き込み
+- サービスアカウントJSONはReplit Secretsに文字列として格納
 
-## Product
+## Configuration
 
-_Describe the high-level user-facing capabilities of this app once they exist._
+`artifacts/karomill/app.py` の先頭で変更可能な変数:
+- `START_DATE = date(2026, 2, 16)` — 1週目の月曜日（基準日）
+- `SPREADSHEET_URL` — 対象スプレッドシートURL
+
+## Required Secrets
+
+- `GEMINI_API_KEY` — Google AI Studio で発行
+- `GOOGLE_SERVICE_ACCOUNT_JSON` — サービスアカウントJSONの中身（テキスト全体）
 
 ## User preferences
 
-_Populate as you build — explicit user instructions worth remembering across sessions._
-
-## Gotchas
-
-_Populate as you build — sharp edges, "always run X before Y" rules._
-
-## Pointers
-
-- See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details
+- モバイルファーストのシンプルUI（1画面完結）
+- Python Flask ベース

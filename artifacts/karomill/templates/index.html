@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>カロミル記録</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0f1117;
+      --surface: #1a1d27;
+      --card: #22263a;
+      --accent: #4f8ef7;
+      --accent2: #6c63ff;
+      --success: #34d399;
+      --error: #f87171;
+      --text: #e8eaf0;
+      --text-muted: #8b90a7;
+      --border: #2e3250;
+      --radius: 16px;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, 'Hiragino Kaku Gothic ProN', 'Noto Sans JP', sans-serif;
+      min-height: 100dvh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-start;
+      padding: 24px 16px 40px;
+    }
+
+    header {
+      text-align: center;
+      margin-bottom: 28px;
+    }
+    header .logo {
+      font-size: 28px;
+      margin-bottom: 6px;
+    }
+    header h1 {
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: 0.03em;
+    }
+    header p {
+      font-size: 13px;
+      color: var(--text-muted);
+      margin-top: 4px;
+    }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 24px 20px;
+      width: 100%;
+      max-width: 420px;
+    }
+
+    /* ─── 画像選択エリア ─── */
+    .upload-zone {
+      border: 2px dashed var(--border);
+      border-radius: 12px;
+      padding: 32px 16px;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color 0.2s, background 0.2s;
+      position: relative;
+      overflow: hidden;
+    }
+    .upload-zone:hover, .upload-zone.drag-over {
+      border-color: var(--accent);
+      background: rgba(79,142,247,0.05);
+    }
+    .upload-zone input[type="file"] {
+      position: absolute; inset: 0; opacity: 0; cursor: pointer;
+    }
+    .upload-zone .icon {
+      font-size: 48px;
+      display: block;
+      margin-bottom: 10px;
+    }
+    .upload-zone .label {
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--accent);
+    }
+    .upload-zone .sub {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-top: 4px;
+    }
+
+    /* プレビュー */
+    #preview-wrap {
+      margin-top: 16px;
+      display: none;
+      position: relative;
+    }
+    #preview-img {
+      width: 100%;
+      border-radius: 10px;
+      max-height: 240px;
+      object-fit: cover;
+      display: block;
+    }
+    #preview-clear {
+      position: absolute;
+      top: 8px; right: 8px;
+      background: rgba(0,0,0,0.6);
+      color: #fff;
+      border: none;
+      border-radius: 50%;
+      width: 28px; height: 28px;
+      font-size: 16px;
+      cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+    }
+
+    /* 送信ボタン */
+    .btn-send {
+      margin-top: 20px;
+      width: 100%;
+      padding: 16px;
+      border: none;
+      border-radius: 12px;
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      color: #fff;
+      font-size: 16px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      cursor: pointer;
+      transition: opacity 0.2s, transform 0.1s;
+    }
+    .btn-send:active { transform: scale(0.98); }
+    .btn-send:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    /* ─── ローディング ─── */
+    #loading {
+      display: none;
+      margin-top: 24px;
+      text-align: center;
+    }
+    .spinner {
+      width: 40px; height: 40px;
+      border: 3px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.9s linear infinite;
+      margin: 0 auto 12px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #loading-text {
+      font-size: 14px;
+      color: var(--text-muted);
+    }
+
+    /* ─── 結果エリア ─── */
+    #result {
+      display: none;
+      margin-top: 20px;
+    }
+    .result-box {
+      border-radius: 12px;
+      padding: 16px;
+      font-size: 14px;
+      line-height: 1.7;
+    }
+    .result-box.success {
+      background: rgba(52,211,153,0.1);
+      border: 1px solid rgba(52,211,153,0.35);
+      color: var(--success);
+    }
+    .result-box.error {
+      background: rgba(248,113,113,0.1);
+      border: 1px solid rgba(248,113,113,0.35);
+      color: var(--error);
+    }
+    .result-title {
+      font-size: 16px;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+    .result-detail {
+      font-size: 13px;
+      margin-top: 10px;
+      color: var(--text-muted);
+    }
+    .result-detail strong { color: var(--text); }
+
+    /* Geminiテキスト */
+    #gemini-output {
+      display: none;
+      margin-top: 16px;
+    }
+    #gemini-output summary {
+      font-size: 13px;
+      color: var(--text-muted);
+      cursor: pointer;
+      padding: 8px 12px;
+      background: var(--surface);
+      border-radius: 8px;
+      border: 1px solid var(--border);
+    }
+    #gemini-output pre {
+      margin-top: 8px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px;
+      font-size: 12px;
+      color: var(--text-muted);
+      white-space: pre-wrap;
+      word-break: break-all;
+      max-height: 300px;
+      overflow-y: auto;
+      font-family: 'SF Mono', monospace;
+    }
+
+    /* リセットボタン */
+    #btn-reset {
+      display: none;
+      margin-top: 14px;
+      width: 100%;
+      padding: 13px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      color: var(--text-muted);
+      font-size: 14px;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="logo">🥗</div>
+    <h1>カロミル自動記録</h1>
+    <p>スクショをアップロード → スプレッドシートへ自動書き込み</p>
+  </header>
+
+  <div class="card">
+
+    <!-- 画像選択 -->
+    <div class="upload-zone" id="upload-zone">
+      <input type="file" id="file-input" accept="image/*" capture="environment" />
+      <span class="icon">📷</span>
+      <span class="label">スクショを選択 / カメラ起動</span>
+      <span class="sub">カロミルの食事・体重スクリーンショット</span>
+    </div>
+
+    <!-- プレビュー -->
+    <div id="preview-wrap">
+      <img id="preview-img" src="" alt="プレビュー" />
+      <button id="preview-clear" title="クリア">✕</button>
+    </div>
+
+    <!-- 送信ボタン -->
+    <button class="btn-send" id="btn-send" disabled>送信・記録する</button>
+
+    <!-- ローディング -->
+    <div id="loading">
+      <div class="spinner"></div>
+      <div id="loading-text">AI解析中...</div>
+    </div>
+
+    <!-- 結果 -->
+    <div id="result"></div>
+
+    <!-- Gemini出力（折りたたみ） -->
+    <details id="gemini-output">
+      <summary>📋 AIの解析テキストを表示</summary>
+      <pre id="gemini-pre"></pre>
+    </details>
+
+    <!-- リセット -->
+    <button id="btn-reset">↩ 別の画像を送る</button>
+
+  </div>
+
+  <script>
+    const fileInput   = document.getElementById('file-input');
+    const uploadZone  = document.getElementById('upload-zone');
+    const previewWrap = document.getElementById('preview-wrap');
+    const previewImg  = document.getElementById('preview-img');
+    const previewClear= document.getElementById('preview-clear');
+    const btnSend     = document.getElementById('btn-send');
+    const loading     = document.getElementById('loading');
+    const loadingText = document.getElementById('loading-text');
+    const resultDiv   = document.getElementById('result');
+    const geminiOut   = document.getElementById('gemini-output');
+    const geminiPre   = document.getElementById('gemini-pre');
+    const btnReset    = document.getElementById('btn-reset');
+
+    let selectedFile = null;
+
+    fileInput.addEventListener('change', e => {
+      const file = e.target.files[0];
+      if (!file) return;
+      selectedFile = file;
+      const url = URL.createObjectURL(file);
+      previewImg.src = url;
+      previewWrap.style.display = 'block';
+      btnSend.disabled = false;
+      resultDiv.style.display = 'none';
+      geminiOut.style.display = 'none';
+      btnReset.style.display = 'none';
+    });
+
+    previewClear.addEventListener('click', reset);
+
+    uploadZone.addEventListener('dragover', e => {
+      e.preventDefault();
+      uploadZone.classList.add('drag-over');
+    });
+    uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('drag-over'));
+    uploadZone.addEventListener('drop', e => {
+      e.preventDefault();
+      uploadZone.classList.remove('drag-over');
+      const file = e.dataTransfer.files[0];
+      if (file) { fileInput.files = e.dataTransfer.files; fileInput.dispatchEvent(new Event('change')); }
+    });
+
+    btnSend.addEventListener('click', async () => {
+      if (!selectedFile) return;
+      setLoading(true, 'AI解析中...');
+
+      const fd = new FormData();
+      fd.append('image', selectedFile);
+
+      try {
+        const resp = await fetch('/upload', { method: 'POST', body: fd });
+
+        setLoading(true, 'スプレッドシート書き込み中...');
+        await new Promise(r => setTimeout(r, 400)); // 視覚的フィードバック
+
+        const json = await resp.json();
+        setLoading(false);
+        showResult(json);
+      } catch (err) {
+        setLoading(false);
+        showResult({ success: false, error: 'ネットワークエラー: ' + err.message });
+      }
+    });
+
+    btnReset.addEventListener('click', reset);
+
+    function setLoading(on, text) {
+      loading.style.display = on ? 'block' : 'none';
+      loadingText.textContent = text || '';
+      btnSend.disabled = on;
+    }
+
+    function showResult(json) {
+      resultDiv.style.display = 'block';
+      btnReset.style.display = 'block';
+
+      if (json.success) {
+        resultDiv.innerHTML = `
+          <div class="result-box success">
+            <div class="result-title">✅ 記録完了！</div>
+            <div>タブ: <strong>${json.tab}</strong></div>
+            <div>日付: <strong>${json.date}</strong> / 体重: <strong>${json.weight} kg</strong></div>
+            <div class="result-detail">スプレッドシートへの書き込みが完了しました。</div>
+          </div>`;
+      } else {
+        resultDiv.innerHTML = `
+          <div class="result-box error">
+            <div class="result-title">❌ エラー</div>
+            <div>${escHtml(json.error || '不明なエラー')}</div>
+          </div>`;
+      }
+
+      if (json.gemini_text) {
+        geminiOut.style.display = 'block';
+        geminiPre.textContent = json.gemini_text;
+      }
+    }
+
+    function escHtml(s) {
+      return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+
+    function reset() {
+      selectedFile = null;
+      fileInput.value = '';
+      previewWrap.style.display = 'none';
+      previewImg.src = '';
+      btnSend.disabled = true;
+      resultDiv.style.display = 'none';
+      geminiOut.style.display = 'none';
+      btnReset.style.display = 'none';
+      loading.style.display = 'none';
+    }
+  </script>
+</body>
+</html>
