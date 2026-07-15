@@ -298,6 +298,43 @@ def upload():
     })
 
 
+@app.route("/test-connection")
+def test_connection():
+    """スプレッドシート接続テスト＆サービスアカウントメール確認用"""
+    result = {}
+
+    # サービスアカウントのメールを取得
+    if not GOOGLE_SERVICE_ACCOUNT_JSON:
+        return jsonify({"success": False, "error": "GOOGLE_SERVICE_ACCOUNT_JSON が未設定です。"}), 500
+    try:
+        sa_info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
+        result["service_account_email"] = sa_info.get("client_email", "取得できませんでした")
+    except Exception as e:
+        return jsonify({"success": False, "error": f"JSON解析エラー: {e}"}), 500
+
+    # Gemini APIキーの存在確認
+    result["gemini_api_key_set"] = bool(GEMINI_API_KEY)
+
+    # スプレッドシートへの接続テスト
+    try:
+        scope = [
+            "https://spreadsheets.google.com/feeds",
+            "https://www.googleapis.com/auth/drive",
+        ]
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(sa_info, scope)
+        gc = gspread.authorize(creds)
+        spreadsheet = gc.open_by_url(SPREADSHEET_URL)
+        sheet_titles = [ws.title for ws in spreadsheet.worksheets()]
+        result["success"] = True
+        result["spreadsheet_title"] = spreadsheet.title
+        result["tabs"] = sheet_titles
+    except Exception as e:
+        result["success"] = False
+        result["spreadsheet_error"] = str(e)
+
+    return jsonify(result)
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
