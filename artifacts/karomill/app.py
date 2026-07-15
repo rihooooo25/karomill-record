@@ -330,7 +330,7 @@ def test_connection():
         result["tabs"] = sheet_titles
     except Exception as e:
         result["success"] = False
-        result["spreadsheet_error"] = str(e)
+        result["spreadsheet_error"] = repr(e)
 
     return jsonify(result)
 
