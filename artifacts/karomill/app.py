@@ -21,10 +21,21 @@ app = Flask(__name__)
 # Gemini APIキー（Replit Secrets: GEMINI_API_KEY）
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
-# 使用するGeminiモデル名
-# モデルが廃止されたら GEMINI_MODEL 環境変数で上書き可能
-# 利用可能モデルは python3 -c "from google import genai, os; [print(m.name) for m in genai.Client(api_key=os.environ['GEMINI_API_KEY']).models.list()]"
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+# モデルフォールバックチェーン（先頭から順に試す）
+# 無料枠のクォータはモデルごと独立 → 1つが枯渇しても次へ自動切り替え
+# GEMINI_MODEL 環境変数でカスタム先頭モデルを指定可能
+_default_first = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+GEMINI_MODEL_CHAIN = [
+    _default_first,
+    "gemini-2.5-flash",
+    "gemini-2.0-flash-lite",
+    "gemini-2.5-flash-lite",
+    "gemini-flash-latest",
+    "gemini-flash-lite-latest",
+]
+# 重複除去（先頭を維持）
+seen = set()
+GEMINI_MODEL_CHAIN = [m for m in GEMINI_MODEL_CHAIN if not (m in seen or seen.add(m))]
 
 # Google サービスアカウント JSON の内容（Replit Secrets: GOOGLE_SERVICE_ACCOUNT_JSON）
 GOOGLE_SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
@@ -145,48 +156,85 @@ def parse_record_date(date_str: str) -> date:
     return candidate
 
 
+def _is_daily_quota_error(err_str: str) -> bool:
+    """日次クォータ枯渇かどうかを判定（分次ではなく日次 = モデル変更が必要）"""
+    return "PerDay" in err_str or "limit: 0" in err_str
+
+
+def _parse_retry_delay(err_str: str) -> int:
+    """エラー文字列から retryDelay 秒数を抽出（見つからなければ 60）"""
+    m = re.search(r"retry[_ ]?(?:in|delay)[^\d]*(\d+)", err_str, re.IGNORECASE)
+    return int(m.group(1)) + 2 if m else 60  # 少し余裕を持たせる
+
+
 def analyze_images_with_gemini(image_list: list) -> dict:
     """Gemini API に複数画像をまとめて1回で送って解析結果を返す。
+
     image_list: [(bytes, mime_type), ...]
-    レート制限時は指数バックオフでリトライ（最大3回）。
+
+    フォールバック戦略:
+      - 日次クォータ枯渇 → 即次モデルへ切り替え
+      - 分次レート制限  → エラーで指定された秒数だけ待ってリトライ（同モデルで1回）
+      - 全モデル枯渇    → エラー詳細を返す
     """
     import time
 
     client = genai.Client(api_key=GEMINI_API_KEY)
-
-    # 全画像を1つのリクエストにまとめる（APIコール1回 = レート制限対策）
     parts = [types.Part.from_bytes(data=b, mime_type=m) for b, m in image_list]
     parts.append(GEMINI_PROMPT)
 
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            response = client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=parts,
-            )
-            break  # 成功したらループを抜ける
-        except Exception as e:
-            err_str = str(e)
-            # レート制限 (429) は待ってリトライ
-            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
-                if attempt < max_retries - 1:
-                    wait = 15 * (attempt + 1)  # 15秒 → 30秒 → 45秒
+    last_error = None
+    tried_models = []
+
+    for model in GEMINI_MODEL_CHAIN:
+        tried_models.append(model)
+        per_minute_retried = False  # 分次制限は1回だけリトライ
+
+        for attempt in range(2):  # attempt 0: 初回, attempt 1: 分次待ちリトライ
+            try:
+                response = client.models.generate_content(
+                    model=model,
+                    contents=parts,
+                )
+                # 成功
+                full_text = response.text
+                json_match = re.search(r"<<<JSON_START>>>(.*?)<<<JSON_END>>>", full_text, re.DOTALL)
+                if not json_match:
+                    raise ValueError("Gemini の応答から JSON を抽出できませんでした。\n\n" + full_text)
+                extracted = json.loads(json_match.group(1).strip())
+                gemini_text = full_text[:full_text.find("<<<JSON_START>>>")].strip()
+                extracted["_gemini_text"] = gemini_text
+                extracted["_model_used"] = model  # デバッグ用
+                return extracted
+
+            except Exception as e:
+                err_str = str(e)
+                last_error = e
+
+                is_quota = "429" in err_str or "RESOURCE_EXHAUSTED" in err_str
+                if not is_quota:
+                    raise  # クォータ以外のエラーはそのまま送出
+
+                if _is_daily_quota_error(err_str):
+                    # 日次枯渇 → このモデルは諦めて次へ
+                    break
+
+                # 分次制限 → 1回だけ待ってリトライ
+                if not per_minute_retried:
+                    per_minute_retried = True
+                    wait = _parse_retry_delay(err_str)
                     time.sleep(wait)
-                    continue
-            raise  # それ以外のエラーはそのまま再送出
+                    continue  # attempt 1 へ
+                else:
+                    # 待ってもまだ制限 → 次モデルへ
+                    break
 
-    full_text = response.text
-
-    # JSON 部分を抽出
-    json_match = re.search(r"<<<JSON_START>>>(.*?)<<<JSON_END>>>", full_text, re.DOTALL)
-    if not json_match:
-        raise ValueError("Gemini の応答から JSON を抽出できませんでした。\n\n" + full_text)
-
-    extracted = json.loads(json_match.group(1).strip())
-    gemini_text = full_text[:full_text.find("<<<JSON_START>>>")].strip()
-    extracted["_gemini_text"] = gemini_text
-    return extracted
+    # 全モデルが失敗
+    tried = ", ".join(tried_models)
+    raise RuntimeError(
+        f"すべてのモデルでクォータが枯渇しています（試行: {tried}）。"
+        f"しばらく時間をおいて再度お試しください。\n詳細: {last_error}"
+    )
 
 
 def write_to_spreadsheet(data: dict) -> str:
