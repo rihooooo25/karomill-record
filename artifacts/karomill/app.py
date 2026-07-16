@@ -75,9 +75,12 @@ GEMINI_PROMPT = """以下の処理手順（①〜⑥）に従って情報を処�
 ・単位は可能な限りそのまま使用（g / ml / 個 / 本 / 枚 など）。
 ⑤ 栄養計算
 ・カロリー（kcal）、P（たんぱく質）、F（脂質）、C（炭水化物）を合計。不明は「不明」。
-⑥ 各食事ごとのPFC合計計算（※1枚目の画像内の各食事のPFC数値と一致させること）
-・朝、昼、夜および間食のPFCをそれぞれ計算する。
-・夜と間食のPFC数値は合算し、1つの結果としてまとめる。
+⑥ 各食事ごとのPFC合計計算
+・朝食・昼食については、食事詳細画像の各食事セクションに記載された個別食品のP・F・C値を合算して算出すること。
+・各食品に「◯%」の摂取割合が記載されている場合は、その割合を乗じてから合算すること（例：P=10g×50%=5g）。
+・夜食・夕食・間食は参考値として合算する（最終的なスプレッドシート書き込み値はシステムが逆算で確定するため、ここでの精度は参考値でよい）。
+・1枚目のサマリー画像下部に表示されている「P:31/24%」などのパーセンテージ表記はグラム数ではないため、1日合計のP/F/C値として絶対に使用しないこと。
+・【合計摂取栄養素】に記載のカロリー・P・F・C数値（グラム値）が1日の絶対合計値であり、JSONの total_kcal / total_P / total_F / total_C に正確に転記すること。
 
 【出力フォーマット】
 【各食事のPFC合計】
@@ -125,8 +128,12 @@ C（炭水化物）： g
 {
   "date": "M/D形式（例: 5/26）",
   "weight": 数値のみ（kgを除く、例: 68.5）,
-  "breakfast": {"P": 数値, "F": 数値, "C": 数値},
-  "lunch": {"P": 数値, "F": 数値, "C": 数値},
+  "total_kcal": 画像【合計摂取栄養素】のカロリー数値（数値のみ、例: 1014）,
+  "total_P": 画像【合計摂取栄養素】のたんぱく質g数値（数値のみ、例: 82.5）,
+  "total_F": 画像【合計摂取栄養素】の脂質g数値（数値のみ、例: 21.4）,
+  "total_C": 画像【合計摂取栄養素】の炭水化物g数値（数値のみ、例: 132.9）,
+  "breakfast": {"kcal": 数値, "P": 数値, "F": 数値, "C": 数値},
+  "lunch": {"kcal": 数値, "P": 数値, "F": 数値, "C": 数値},
   "dinner_snack": {"P": 数値, "F": 数値, "C": 数値},
   "exercise": [
     {"menu": "メニュー名", "reps": "回数や時間", "sets": "セット数（不明なら空文字）"}
@@ -358,6 +365,22 @@ def upload():
         data = analyze_images_with_gemini(image_list)
     except Exception as e:
         return jsonify({"success": False, "error": f"AI解析エラー: {str(e)}"}), 500
+
+    # ── 夜・間食のPFCを逆算で確定（合計 - 朝食 - 昼食）────────────────
+    # Geminiの個別合算では端数誤差が出るため、1日合計から逆算して100%一致させる
+    try:
+        total_P = float(data.get("total_P") or 0)
+        total_F = float(data.get("total_F") or 0)
+        total_C = float(data.get("total_C") or 0)
+        bf = data.get("breakfast", {})
+        lu = data.get("lunch", {})
+        data["dinner_snack"] = {
+            "P": round(total_P - float(bf.get("P") or 0) - float(lu.get("P") or 0), 1),
+            "F": round(total_F - float(bf.get("F") or 0) - float(lu.get("F") or 0), 1),
+            "C": round(total_C - float(bf.get("C") or 0) - float(lu.get("C") or 0), 1),
+        }
+    except (TypeError, ValueError):
+        pass  # 数値変換失敗時はGemini抽出値をそのまま使用
 
     # スプレッドシート書き込み
     try:

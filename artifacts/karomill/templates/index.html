@@ -221,6 +221,27 @@
     }
     .result-detail strong { color: var(--text); }
 
+    /* スプレッドシートリンクボタン */
+    .btn-sheet {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      width: 100%;
+      padding: 12px;
+      border: 1px solid rgba(52,211,153,0.4);
+      border-radius: 10px;
+      background: rgba(52,211,153,0.08);
+      color: var(--success);
+      font-size: 14px;
+      font-weight: 600;
+      text-decoration: none;
+      cursor: pointer;
+      transition: background 0.2s;
+      margin-top: 12px;
+    }
+    .btn-sheet:active { background: rgba(52,211,153,0.18); }
+
     /* Geminiテキスト */
     #gemini-output {
       display: none;
@@ -235,12 +256,15 @@
       border-radius: 8px;
       border: 1px solid var(--border);
     }
+    .gemini-text-wrap {
+      position: relative;
+    }
     #gemini-output pre {
       margin-top: 8px;
       background: var(--surface);
       border: 1px solid var(--border);
       border-radius: 8px;
-      padding: 14px;
+      padding: 14px 14px 48px;
       font-size: 12px;
       color: var(--text-muted);
       white-space: pre-wrap;
@@ -249,6 +273,22 @@
       overflow-y: auto;
       font-family: 'SF Mono', monospace;
     }
+    #btn-copy {
+      position: absolute;
+      bottom: 16px;
+      right: 10px;
+      padding: 6px 14px;
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+      white-space: nowrap;
+    }
+    #btn-copy.copied { background: var(--success); color: #fff; }
 
     /* リセットボタン */
     #btn-reset {
@@ -271,6 +311,12 @@
     <div class="logo">🥗</div>
     <h1>カロミル自動記録</h1>
     <p>スクショをアップロード → スプレッドシートへ自動書き込み</p>
+    <a class="btn-sheet"
+       href="https://docs.google.com/spreadsheets/d/1z9PX6D_zbd1fhDDATzOOZNlLd3Ux1eMchoDBrMi7qCA/edit?usp=drivesdk"
+       target="_blank" rel="noopener noreferrer"
+       style="max-width:420px;margin:10px auto 0;">
+      📊 スプレッドシートを確認する
+    </a>
   </header>
 
   <div class="card">
@@ -304,7 +350,10 @@
     <!-- Gemini出力（折りたたみ） -->
     <details id="gemini-output">
       <summary>📋 AIの解析テキストを表示</summary>
-      <pre id="gemini-pre"></pre>
+      <div class="gemini-text-wrap">
+        <pre id="gemini-pre"></pre>
+        <button id="btn-copy">📋 コピーする</button>
+      </div>
     </details>
 
     <!-- リセット -->
@@ -324,7 +373,30 @@
     const resultDiv     = document.getElementById('result');
     const geminiOut     = document.getElementById('gemini-output');
     const geminiPre     = document.getElementById('gemini-pre');
+    const btnCopy       = document.getElementById('btn-copy');
     const btnReset      = document.getElementById('btn-reset');
+
+    // ── コピーボタン ────────────────────────────
+    btnCopy.addEventListener('click', async () => {
+      const text = geminiPre.textContent;
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch {
+        // fallback
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed'; ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select(); document.execCommand('copy');
+        document.body.removeChild(ta);
+      }
+      btnCopy.textContent = '✅ コピーしました！';
+      btnCopy.classList.add('copied');
+      setTimeout(() => {
+        btnCopy.textContent = '📋 コピーする';
+        btnCopy.classList.remove('copied');
+      }, 2000);
+    });
 
     // 選択ファイル一覧 [{file, objectUrl}]
     let selectedFiles = [];
@@ -449,12 +521,17 @@
       resultDiv.style.display = 'block';
       btnReset.style.display = 'block';
 
+      const sheetUrl = 'https://docs.google.com/spreadsheets/d/1z9PX6D_zbd1fhDDATzOOZNlLd3Ux1eMchoDBrMi7qCA/edit?usp=drivesdk';
       const html = results.map((json, i) => {
         if (json.success) {
           return `<div class="result-box success" style="margin-bottom:10px">
-            <div class="result-title">✅ 画像${i+1} 記録完了</div>
+            <div class="result-title">✅ 記録完了！</div>
             <div>タブ: <strong>${json.tab}</strong></div>
             <div>日付: <strong>${json.date}</strong> / 体重: <strong>${json.weight} kg</strong></div>
+            <a class="btn-sheet" href="${sheetUrl}" target="_blank" rel="noopener noreferrer"
+               style="margin-top:10px;">
+              📊 スプレッドシートを確認する
+            </a>
           </div>`;
         } else {
           return `<div class="result-box error" style="margin-bottom:10px">
