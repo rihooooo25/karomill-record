@@ -374,11 +374,13 @@ def write_to_spreadsheet(data: dict) -> str:
 # ─────────────────────────────────────────────
 
 @app.route("/")
+@basic_auth_required
 def index():
     return render_template("index.html")
 
 
 @app.route("/upload", methods=["POST"])
+@basic_auth_required
 def upload():
     # 複数ファイル（images[]）または単一ファイル（image）を受け付ける
     files = request.files.getlist("images") or request.files.getlist("image")
@@ -436,6 +438,7 @@ def upload():
 
 
 @app.route("/test-connection")
+@basic_auth_required
 def test_connection():
     """スプレッドシート接続テスト＆サービスアカウントメール確認用"""
     result = {}
