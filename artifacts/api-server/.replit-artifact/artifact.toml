@@ -37,3 +37,9 @@ paths = ["/"]
 
 [services.development]
 run = "python3 /home/runner/workspace/artifacts/karomill/app.py"
+
+[services.production.run]
+args = ["gunicorn", "-w", "2", "-b", "0.0.0.0:5000", "--chdir", "/home/runner/workspace/artifacts/karomill", "app:app"]
+
+[services.production.run.env]
+PORT = "5000"
