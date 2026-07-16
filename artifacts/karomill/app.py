@@ -11,12 +11,44 @@ from google import genai
 from google.genai import types
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, Response
+from functools import wraps
 
 # ─────────────────────────────────────────────
 # 設定
 # ─────────────────────────────────────────────
 app = Flask(__name__)
+
+# ─────────────────────────────────────────────
+# Basic認証
+# ─────────────────────────────────────────────
+BASIC_AUTH_USERNAME = os.environ.get("BASIC_AUTH_USERNAME", "")
+BASIC_AUTH_PASSWORD = os.environ.get("BASIC_AUTH_PASSWORD", "")
+
+def check_auth(username: str, password: str) -> bool:
+    """入力された認証情報を環境変数と照合する"""
+    return username == BASIC_AUTH_USERNAME and password == BASIC_AUTH_PASSWORD
+
+def require_auth():
+    """401レスポンスを返してブラウザの認証ダイアログを表示させる"""
+    return Response(
+        "認証が必要です。ユーザー名とパスワードを入力してください。",
+        401,
+        {"WWW-Authenticate": 'Basic realm="Karomill"'},
+    )
+
+def basic_auth_required(f):
+    """Basic認証デコレータ"""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        # 認証情報が未設定の場合はスキップ（開発時の利便性のため）
+        if not BASIC_AUTH_USERNAME or not BASIC_AUTH_PASSWORD:
+            return f(*args, **kwargs)
+        auth = request.authorization
+        if not auth or not check_auth(auth.username, auth.password):
+            return require_auth()
+        return f(*args, **kwargs)
+    return decorated
 
 # Gemini APIキー（Replit Secrets: GEMINI_API_KEY）
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
