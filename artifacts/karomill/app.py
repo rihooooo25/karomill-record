@@ -4,8 +4,8 @@
 import os
 import json
 import re
-import base64
-from datetime import datetime, timedelta, date
+import time
+from datetime import datetime, date
 
 from google import genai
 from google.genai import types
@@ -26,11 +26,9 @@ BASIC_AUTH_USERNAME = os.environ.get("BASIC_AUTH_USERNAME", "")
 BASIC_AUTH_PASSWORD = os.environ.get("BASIC_AUTH_PASSWORD", "")
 
 def check_auth(username: str, password: str) -> bool:
-    """入力された認証情報を環境変数と照合する"""
     return username == BASIC_AUTH_USERNAME and password == BASIC_AUTH_PASSWORD
 
 def require_auth():
-    """401レスポンスを返してブラウザの認証ダイアログを表示させる"""
     return Response(
         "認証が必要です。ユーザー名とパスワードを入力してください。",
         401,
@@ -38,10 +36,8 @@ def require_auth():
     )
 
 def basic_auth_required(f):
-    """Basic認証デコレータ"""
     @wraps(f)
     def decorated(*args, **kwargs):
-        # 認証情報が未設定の場合はスキップ（開発時の利便性のため）
         if not BASIC_AUTH_USERNAME or not BASIC_AUTH_PASSWORD:
             return f(*args, **kwargs)
         auth = request.authorization
@@ -50,14 +46,11 @@ def basic_auth_required(f):
         return f(*args, **kwargs)
     return decorated
 
-# Gemini APIキー（Replit Secrets: GEMINI_API_KEY）
+# ─────────────────────────────────────────────
+# Gemini設定
+# ─────────────────────────────────────────────
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
-# モデルフォールバックチェーン（先頭から順に試す）
-# ・429（クォータ枯渇）→ 次のモデルへ
-# ・404（廃止・未提供）→ 次のモデルへ
-# ・gemini-2.5-* / gemini-1.5-* は新規ユーザー非提供のため除外済み
-# GEMINI_MODEL 環境変数で先頭モデルを差し替え可能
 _default_first = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
 GEMINI_MODEL_CHAIN = [
     _default_first,
@@ -68,141 +61,95 @@ GEMINI_MODEL_CHAIN = [
     "gemini-3-flash-preview",
     "gemini-3.5-flash",
 ]
-# 重複除去（先頭を維持）
 seen: set = set()
 GEMINI_MODEL_CHAIN = [m for m in GEMINI_MODEL_CHAIN if not (m in seen or seen.add(m))]
 
-# Google サービスアカウント JSON の内容（Replit Secrets: GOOGLE_SERVICE_ACCOUNT_JSON）
 GOOGLE_SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
-
-# 対象スプレッドシートURL
 SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1z9PX6D_zbd1fhDDATzOOZNlLd3Ux1eMchoDBrMi7qCA/edit"
-
-# 1週目の開始月曜日（必要に応じてここを書き換えてください）
-START_DATE = date(2026, 3, 31)  # 2週目が4/7のため、1週目開始=3/31
+START_DATE = date(2026, 3, 31)
 
 # ─────────────────────────────────────────────
-# Gemini プロンプト
+# Gemini プロンプト（サマリー用・詳細用に分割）
 # ─────────────────────────────────────────────
-GEMINI_PROMPT = """以下の処理手順（①〜⑥）に従って情報を処理し、最終的に「出力フォーマット」に完全一致する形で結果のみを返却してください。それ以外の内部計算の過程や余計な説明は一切出力しないでください。
 
-【処理手順】
-① OCR抽出（最優先）
-・画像内のテキストを一言一句抽出する。
-・※食物繊維や塩分の欄の下部にあるメモ書き（睡眠時間、体重、運動内容など）も漏らさず正確に抽出すること。
-・推測・補完は禁止。不明箇所は「不明」と記載する。
-② 抽出内容の整理
-・以下を箇条書きで列挙：食品名、表示されている数値（g・kcal・mlなど）、表示されている％
-・※この段階では計算しない。
-③ 数値計算
-・「総重量 × ％」で実際の摂取量を算出（例：150g（50%）→ 75g）。
-・最終出力の分量欄には、計算後の「実際に摂取した総量（数値と単位のみ）」を記載すること。
-・「小さじ1杯4.6g」「大さじ1」「◯%」といった計算前の表記や、テキストの重複表記はすべて排除し、最終的な実摂取量（g、ml、個など）のみに集約すること。根拠が不明な場合は「算出不可」。
-④ メニュー整形
-・「食品名 分量」の形式に統一する。
-・ブランド名・販売元（例：by Amazon、みなさまのお墨付き など）を削除すること。
-・食材名に含まれる不要な修飾語・シリーズ名・原産地・パッケージ形状（例：「毎日」「ENRGY BOOSTER」「イタリア産5種の」「国産」「リーフパック」など）は削除すること。
-・ただし、食材の重要な特徴である「味の種類（例：ストロベリー風味、カフェラテ味）」や、「食材の状態（例：生、ゆで、乾、根・皮あり）」に関する記述は絶対に削除せず、そのまま残すこと。
-・一般的な単語（「オイル」「ごはん」「チキン」など）へ過剰に丸める（省略する）ことは禁止。
-・単位は可能な限りそのまま使用（g / ml / 個 / 本 / 枚 など）。
-⑤ 栄養計算
-・カロリー（kcal）、P（たんぱく質）、F（脂質）、C（炭水化物）を合計。不明は「不明」。
-⑥ 各食事ごとのPFC合計計算
-・朝食・昼食については、食事詳細画像の各食事セクションに記載された個別食品のP・F・C値を合算して算出すること。
-・各食品に「◯%」の摂取割合が記載されている場合は、その割合を乗じてから合算すること（例：P=10g×50%=5g）。
-・夜食・夕食・間食は参考値として合算する（最終的なスプレッドシート書き込み値はシステムが逆算で確定するため、ここでの精度は参考値でよい）。
-・1枚目のサマリー画像下部に表示されている「P:31/24%」などのパーセンテージ表記はグラム数ではないため、1日合計のP/F/C値として絶対に使用しないこと。
-・【合計摂取栄養素】に記載のカロリー・P・F・C数値（グラム値）が1日の絶対合計値であり、JSONの total_kcal / total_P / total_F / total_C に正確に転記すること。
+SUMMARY_PROMPT = """これはカロミルアプリの「帳尻合わせ」画面のスクリーンショットです。
+画像から以下の情報を正確に抽出し、下記JSONのみを出力してください。説明文は一切不要です。
 
-【出力フォーマット】
-【各食事のPFC合計】
-朝食 [P:◯g F:◯g C:◯g]
-昼食 [P:◯g F:◯g C:◯g]
-夜・間食 [P:◯g F:◯g C:◯g]
-M月D日(曜日)
-睡眠 ◯◯:◯◯～◯◯:◯◯
-体重 ◯◯kg (前日比 kg)
-【合計摂取栄養素】
-カロリー： kcal
-P（たんぱく質）： g
-F（脂質）： g
-C（炭水化物）： g
-1回目 朝食（HH:MM）
-メニュー名 分量
-2回目 昼食（HH:MM）
-メニュー名 分量
-3回目 間食（HH:MM）
-メニュー名 分量
-4回目 夕食（HH:MM）
-メニュー名 分量
-【自己評価】
-（※ユーザー記載をそのまま使用）
-【運動】
-（※画像から抽出した運動メモを改行を維持してそのまま記載）
-
-【フォーマット厳守ルール】
-・出力は上記の【出力フォーマット】の内容のみとする。
-・日付は「4月29日(水)」形式（ゼロ埋め禁止）。
-・【各食事のPFC合計】は【合計摂取栄養素】より前に配置。
-・食事回数は「1回目 朝食」「2回目 昼食」形式。
-・食事と時間は同一行に記載（例：1回目 朝食（09:00））。
-・メニューは改行のみで箇条書き記号（「・」など）は使用禁止。
-・体重は「体重 ◯◯kg (前日比 kg)」の形式で出力し、画像から抽出した数値を◯◯に入れ、「(前日比 kg)」という文字列はそのまま残すこと。
-・自己評価はユーザー記載をそのまま使用（改変禁止）。
-・運動メモは【自己評価】の下に配置し、画像内の改行をそのまま維持して出力すること。
-・日本語・事務的・簡潔に記述。推測・補完は禁止。情報不足は必ず「不明」とする。
-・過去データ参照禁止。ハルシネーションは避ける。
-・睡眠、体重、運動メモは画像に記載のものをフォーマットに従ってそのまま出力する。
-
-さらに、以下のJSONも出力の末尾に追加してください（スプレッドシート書き込み用）。他の文字は一切付けないこと。
+【重要な抽出ルール】
+・日付：画面上部の「昨日 M/D (曜日)」または「M月D日(曜日)」から「M/D」形式で抽出
+・体重：「栄養サマリー」カードの下部左側に単独で表示されている小数点1桁の数値（例：76.2）が体重(kg)。
+　　　　「/」の右側の目標値ではなく必ず左側の実績値を読み取ること。絶対に見落とさないこと。
+・睡眠：カード内の「HH:MM〜HH:MM」形式の時刻をそのまま抽出（なければ空文字）
+・合計栄養素：「カロリー ◯/◯kcal」の左の実績値を total_kcal に。たんぱく質・脂質・炭水化物も左の実績値のみ
+・下部の「P:31/24%」などのパーセンテージはグラム数ではないため total_P 等に絶対使用しないこと
+・自己評価・運動メモ：画面内に記載があれば抽出、なければ空文字
+・exercise配列：運動メモから種目・回数・セット数を構造化。読み取れない場合は空配列
 
 <<<JSON_START>>>
 {
-  "date": "M/D形式（例: 5/26）",
-  "weight": 数値のみ（kgを除く、例: 68.5）,
-  "total_kcal": 画像【合計摂取栄養素】のカロリー数値（数値のみ、例: 1014）,
-  "total_P": 画像【合計摂取栄養素】のたんぱく質g数値（数値のみ、例: 82.5）,
-  "total_F": 画像【合計摂取栄養素】の脂質g数値（数値のみ、例: 21.4）,
-  "total_C": 画像【合計摂取栄養素】の炭水化物g数値（数値のみ、例: 132.9）,
-  "breakfast": {"kcal": 数値, "P": 数値, "F": 数値, "C": 数値},
-  "lunch": {"kcal": 数値, "P": 数値, "F": 数値, "C": 数値},
-  "dinner_snack": {"P": 数値, "F": 数値, "C": 数値},
+  "date": "M/D形式（例: 7/16）",
+  "weight": 数値のみ（例: 76.2）,
+  "sleep": "HH:MM〜HH:MM（例: 2:00〜8:00）、なければ空文字",
+  "total_kcal": 数値のみ,
+  "total_P": 数値のみ,
+  "total_F": 数値のみ,
+  "total_C": 数値のみ,
+  "self_evaluation": "自己評価テキスト（なければ空文字）",
+  "exercise_notes": "運動メモ原文（なければ空文字）",
   "exercise": [
-    {"menu": "メニュー名", "reps": "回数や時間", "sets": "セット数（不明なら空文字）"}
+    {"menu": "種目名", "reps": "回数や時間", "sets": "セット数（不明なら空文字）"}
+  ]
+}
+<<<JSON_END>>>"""
+
+
+DETAIL_PROMPT = """これはカロミルアプリの食事詳細スクリーンショットです。
+画像に表示されているすべての食事セクションの情報を正確に抽出し、下記JSONのみを出力してください。
+
+【OCR最重要ルール】
+・食品名のひらがな・カタカナ・漢字を一字一句そのまま書き起こすこと
+・特に以下の文字を混同しないよう注意：こ↔つ、ん↔じ、い↔り、あ↔お、ぬ↔め
+・ブランド名・販売元（by Amazon、みなさまのお墨付き 等）は削除
+・不要な修飾語・原産地・パッケージ形状（国産、毎日、ENRGY BOOSTER、リーフパック 等）は削除
+・食材の状態（生・ゆで・乾・根・皮あり等）と味の種類は必ず残すこと
+
+【数値抽出ルール】
+・「食品名 100g（50%）」→ base_amount=100, base_unit="g", percentage=50
+・「食品名 小さじ1杯4.6g（100%）」→ base_amount=4.6, base_unit="g", percentage=100
+・「食品名 1個（100%）」→ base_amount=1, base_unit="個", percentage=100
+・「食品名 1株（100%）」→ base_amount=1, base_unit="株", percentage=100
+・「食品名（◯%）」で基準量の記載なし → base_amount=null, base_unit="pct_only", percentage=◯
+・P・F・C値：画像に表示されている数値をそのまま抽出（%適用前の値）
+・数値が読み取れない場合は0
+
+<<<JSON_START>>>
+{
+  "meals": [
+    {
+      "type": "朝食|昼食|夕食|間食",
+      "time": "HH:MM（読み取れない場合は空文字）",
+      "items": [
+        {
+          "name": "整形済み食品名",
+          "base_amount": 数値またはnull,
+          "base_unit": "g|ml|個|本|枚|株|杯|缶|食|袋|pct_only",
+          "percentage": 数値（0〜100、省略なし100%の場合も100）,
+          "P": たんぱく質g（数値のみ、%適用前）,
+          "F": 脂質g（数値のみ、%適用前）,
+          "C": 炭水化物g（数値のみ、%適用前）
+        }
+      ]
+    }
   ]
 }
 <<<JSON_END>>>"""
 
 
 # ─────────────────────────────────────────────
-# ヘルパー関数
+# Gemini APIヘルパー
 # ─────────────────────────────────────────────
 
-def get_week_number(record_date: date) -> int:
-    """基準日からの週番号を返す（1始まり）"""
-    delta = (record_date - START_DATE).days
-    return delta // 7 + 1
-
-
-def parse_record_date(date_str: str) -> date:
-    """'M/D' 形式の文字列を date オブジェクトに変換（現在年を使用）"""
-    parts = date_str.strip().split("/")
-    month = int(parts[0])
-    day = int(parts[1])
-    year = datetime.now().year
-    # 年またぎ対応（1〜3月の記録を年末に処理するケース）
-    today = date.today()
-    candidate = date(year, month, day)
-    if abs((candidate - today).days) > 180:
-        candidate = date(year - 1, month, day)
-    return candidate
-
-
 def _is_skip_model_error(err_str: str) -> bool:
-    """このモデルを諦めて次へ切り替えるべきエラーかどうかを判定。
-    - 日次クォータ枯渇（429 PerDay / limit: 0）
-    - モデル非提供・廃止（404 not found / no longer available）
-    """
     if "404" in err_str or "NOT_FOUND" in err_str or "no longer available" in err_str:
         return True
     if "PerDay" in err_str or "limit: 0" in err_str:
@@ -211,84 +158,228 @@ def _is_skip_model_error(err_str: str) -> bool:
 
 
 def _parse_retry_delay(err_str: str) -> int:
-    """エラー文字列から retryDelay 秒数を抽出（見つからなければ 60）"""
     m = re.search(r"retry[_ ]?(?:in|delay)[^\d]*(\d+)", err_str, re.IGNORECASE)
-    return int(m.group(1)) + 2 if m else 60  # 少し余裕を持たせる
+    return int(m.group(1)) + 2 if m else 60
 
 
-def analyze_images_with_gemini(image_list: list) -> dict:
-    """Gemini API に複数画像をまとめて1回で送って解析結果を返す。
-
-    image_list: [(bytes, mime_type), ...]
-
-    フォールバック戦略:
-      - 日次クォータ枯渇 → 即次モデルへ切り替え
-      - 分次レート制限  → エラーで指定された秒数だけ待ってリトライ（同モデルで1回）
-      - 全モデル枯渇    → エラー詳細を返す
-    """
-    import time
-
+def call_gemini(image_data: tuple, prompt: str) -> str:
+    """1枚の画像と指定プロンプトでGeminiを呼び出しテキストを返す。フォールバックチェーン付き。"""
+    image_bytes, mime_type = image_data
     client = genai.Client(api_key=GEMINI_API_KEY)
-    parts = [types.Part.from_bytes(data=b, mime_type=m) for b, m in image_list]
-    parts.append(GEMINI_PROMPT)
+    parts = [types.Part.from_bytes(data=image_bytes, mime_type=mime_type), prompt]
 
     last_error = None
     tried_models = []
 
     for model in GEMINI_MODEL_CHAIN:
         tried_models.append(model)
-        per_minute_retried = False  # 分次制限は1回だけリトライ
+        per_minute_retried = False
 
-        for attempt in range(2):  # attempt 0: 初回, attempt 1: 分次待ちリトライ
+        for _ in range(2):
             try:
-                response = client.models.generate_content(
-                    model=model,
-                    contents=parts,
-                )
-                # 成功
-                full_text = response.text
-                json_match = re.search(r"<<<JSON_START>>>(.*?)<<<JSON_END>>>", full_text, re.DOTALL)
-                if not json_match:
-                    raise ValueError("Gemini の応答から JSON を抽出できませんでした。\n\n" + full_text)
-                extracted = json.loads(json_match.group(1).strip())
-                gemini_text = full_text[:full_text.find("<<<JSON_START>>>")].strip()
-                extracted["_gemini_text"] = gemini_text
-                extracted["_model_used"] = model  # デバッグ用
-                return extracted
-
+                response = client.models.generate_content(model=model, contents=parts)
+                return response.text
             except Exception as e:
                 err_str = str(e)
                 last_error = e
-
                 is_quota = "429" in err_str or "RESOURCE_EXHAUSTED" in err_str
                 if not is_quota:
-                    raise  # クォータ以外のエラーはそのまま送出
-
+                    raise
                 if _is_skip_model_error(err_str):
-                    # 日次枯渇 → このモデルは諦めて次へ
                     break
-
-                # 分次制限 → 1回だけ待ってリトライ
                 if not per_minute_retried:
                     per_minute_retried = True
-                    wait = _parse_retry_delay(err_str)
-                    time.sleep(wait)
-                    continue  # attempt 1 へ
+                    time.sleep(_parse_retry_delay(err_str))
+                    continue
                 else:
-                    # 待ってもまだ制限 → 次モデルへ
                     break
 
-    # 全モデルが失敗
     tried = ", ".join(tried_models)
     raise RuntimeError(
-        f"すべてのモデルでクォータが枯渇しています（試行: {tried}）。"
-        f"しばらく時間をおいて再度お試しください。\n詳細: {last_error}"
+        f"すべてのモデルでクォータが枯渇（試行: {tried}）。しばらく時間をおいて再試行してください。\n詳細: {last_error}"
     )
 
 
+def extract_json(text: str) -> dict:
+    """<<<JSON_START>>>...<<<JSON_END>>> からJSONを抽出してdictを返す"""
+    m = re.search(r"<<<JSON_START>>>(.*?)<<<JSON_END>>>", text, re.DOTALL)
+    if not m:
+        raise ValueError(f"JSONを抽出できませんでした。Gemini応答:\n{text[:500]}")
+    return json.loads(m.group(1).strip())
+
+
+def analyze_summary(image_data: tuple) -> dict:
+    """サマリー画像（帳尻合わせ）を解析"""
+    return extract_json(call_gemini(image_data, SUMMARY_PROMPT))
+
+
+def analyze_detail(image_data: tuple) -> dict:
+    """食事詳細画像1枚を解析"""
+    return extract_json(call_gemini(image_data, DETAIL_PROMPT))
+
+
+# ─────────────────────────────────────────────
+# PFC計算・表示テキスト生成
+# ─────────────────────────────────────────────
+
+# 個数系の単位（%を摂取量に適用しない）
+COUNT_UNITS = {"個", "本", "枚", "株", "杯", "缶", "食", "袋", "切", "片"}
+WEEKDAYS = ["月", "火", "水", "木", "金", "土", "日"]
+
+
+def calc_actual_pfc(item: dict) -> tuple:
+    """食品1つの実際のP/F/C（%適用後）を返す"""
+    pct = float(item.get("percentage") or 100) / 100
+    P = round(float(item.get("P") or 0) * pct, 1)
+    F = round(float(item.get("F") or 0) * pct, 1)
+    C = round(float(item.get("C") or 0) * pct, 1)
+    return P, F, C
+
+
+def format_amount(base_amount, base_unit: str, percentage: float) -> str:
+    """表示用の分量文字列を生成"""
+    if base_unit == "pct_only":
+        return f"({int(percentage)}%)"
+    if base_amount is None:
+        return ""
+    if base_unit in COUNT_UNITS:
+        amt = int(base_amount) if float(base_amount) == int(float(base_amount)) else base_amount
+        return f"{amt}{base_unit}"
+    else:
+        actual = float(base_amount) * percentage / 100
+        amt = int(actual) if actual == int(actual) else round(actual, 1)
+        return f"{amt}{base_unit}"
+
+
+def sum_pfc(meals: list) -> dict:
+    """mealリストからPFCを合計"""
+    P, F, C = 0.0, 0.0, 0.0
+    for meal in meals:
+        for item in meal.get("items", []):
+            p, f, c = calc_actual_pfc(item)
+            P += p; F += f; C += c
+    return {"P": round(P, 1), "F": round(F, 1), "C": round(C, 1)}
+
+
+def build_gemini_text(summary: dict, meal_map: dict, pfc_map: dict, ds_pfc: dict) -> str:
+    """ユーザー向け表示テキストを構築"""
+    lines = []
+
+    # PFC合計
+    bf = pfc_map.get("朝食", {"P": 0, "F": 0, "C": 0})
+    lu = pfc_map.get("昼食", {"P": 0, "F": 0, "C": 0})
+    lines.append("【各食事のPFC合計】")
+    lines.append(f"朝食 [P:{bf['P']}g F:{bf['F']}g C:{bf['C']}g]")
+    lines.append(f"昼食 [P:{lu['P']}g F:{lu['F']}g C:{lu['C']}g]")
+    lines.append(f"夜・間食 [P:{ds_pfc['P']}g F:{ds_pfc['F']}g C:{ds_pfc['C']}g]")
+
+    # 日付・睡眠・体重
+    date_str = summary.get("date", "不明")
+    try:
+        d = parse_record_date(date_str)
+        lines.append(f"{d.month}月{d.day}日({WEEKDAYS[d.weekday()]})")
+    except Exception:
+        lines.append(date_str)
+
+    lines.append(f"睡眠 {summary.get('sleep') or '不明'}")
+    w = summary.get("weight", "不明")
+    lines.append(f"体重 {w}kg (前日比 kg)")
+
+    # 合計摂取栄養素
+    lines.append("【合計摂取栄養素】")
+    lines.append(f"カロリー： {summary.get('total_kcal', '不明')}kcal")
+    lines.append(f"P（たんぱく質）： {summary.get('total_P', '不明')}g")
+    lines.append(f"F（脂質）： {summary.get('total_F', '不明')}g")
+    lines.append(f"C（炭水化物）： {summary.get('total_C', '不明')}g")
+
+    # 食事詳細（朝食→昼食→間食→夕食の順）
+    counter = 1
+    for meal_type in ["朝食", "昼食", "間食", "夕食"]:
+        for meal in meal_map.get(meal_type, []):
+            t = meal.get("time", "") or ""
+            time_part = f"（{t}）" if t else ""
+            lines.append(f"{counter}回目 {meal_type}{time_part}")
+            for item in meal.get("items", []):
+                amt = format_amount(
+                    item.get("base_amount"),
+                    item.get("base_unit", ""),
+                    float(item.get("percentage") or 100),
+                )
+                lines.append(f"{item['name']} {amt}".strip())
+            counter += 1
+
+    # 自己評価・運動
+    lines.append("【自己評価】")
+    lines.append(summary.get("self_evaluation") or "不明")
+    lines.append("【運動】")
+    lines.append(summary.get("exercise_notes") or "不明")
+
+    return "\n".join(lines)
+
+
+def merge_results(summary: dict, detail_list: list) -> dict:
+    """サマリーと詳細を統合してスプレッドシート書き込み用dictを返す"""
+    # 食事種別ごとにまとめる
+    meal_map: dict = {}
+    for detail in detail_list:
+        for meal in detail.get("meals", []):
+            mt = meal.get("type", "不明")
+            meal_map.setdefault(mt, []).append(meal)
+
+    # PFCをPythonで計算（食事種別ごと）
+    pfc_map = {mt: sum_pfc(meals) for mt, meals in meal_map.items()}
+
+    # 夜・間食を逆算（合計 - 朝食 - 昼食）
+    total_P = float(summary.get("total_P") or 0)
+    total_F = float(summary.get("total_F") or 0)
+    total_C = float(summary.get("total_C") or 0)
+    bf = pfc_map.get("朝食", {"P": 0, "F": 0, "C": 0})
+    lu = pfc_map.get("昼食", {"P": 0, "F": 0, "C": 0})
+    ds_pfc = {
+        "P": round(total_P - bf["P"] - lu["P"], 1),
+        "F": round(total_F - bf["F"] - lu["F"], 1),
+        "C": round(total_C - bf["C"] - lu["C"], 1),
+    }
+
+    gemini_text = build_gemini_text(summary, meal_map, pfc_map, ds_pfc)
+
+    return {
+        "date": summary.get("date", ""),
+        "weight": summary.get("weight", ""),
+        "total_kcal": summary.get("total_kcal"),
+        "total_P": total_P,
+        "total_F": total_F,
+        "total_C": total_C,
+        "breakfast": {"P": bf["P"], "F": bf["F"], "C": bf["C"], "kcal": 0},
+        "lunch": {"P": lu["P"], "F": lu["F"], "C": lu["C"], "kcal": 0},
+        "dinner_snack": ds_pfc,
+        "exercise": summary.get("exercise", []),
+        "_gemini_text": gemini_text,
+    }
+
+
+# ─────────────────────────────────────────────
+# スプレッドシート書き込み
+# ─────────────────────────────────────────────
+
+def get_week_number(record_date: date) -> int:
+    delta = (record_date - START_DATE).days
+    return delta // 7 + 1
+
+
+def parse_record_date(date_str: str) -> date:
+    parts = date_str.strip().split("/")
+    month = int(parts[0])
+    day = int(parts[1])
+    year = datetime.now().year
+    today = date.today()
+    candidate = date(year, month, day)
+    if abs((candidate - today).days) > 180:
+        candidate = date(year - 1, month, day)
+    return candidate
+
+
 def write_to_spreadsheet(data: dict) -> str:
-    """解析データをスプレッドシートの適切なタブ・セルへ書き込む"""
-    # サービスアカウント認証
     if not GOOGLE_SERVICE_ACCOUNT_JSON:
         raise ValueError("GOOGLE_SERVICE_ACCOUNT_JSON が設定されていません。")
 
@@ -299,23 +390,19 @@ def write_to_spreadsheet(data: dict) -> str:
     ]
     creds = ServiceAccountCredentials.from_json_keyfile_dict(sa_info, scope)
     gc = gspread.authorize(creds)
-
     spreadsheet = gc.open_by_url(SPREADSHEET_URL)
 
-    # 週番号を計算
     record_date = parse_record_date(data["date"])
     week_num = get_week_number(record_date)
     tab_name = f"{week_num}週目"
 
-    # タブを取得（見つからなければエラー）
     try:
         worksheet = spreadsheet.worksheet(tab_name)
     except gspread.exceptions.WorksheetNotFound:
-        raise ValueError(f"タブ「{tab_name}」が見つかりませんでした。スプレッドシートに追加してください。")
+        raise ValueError(f"タブ「{tab_name}」が見つかりません。スプレッドシートに追加してください。")
 
-    # Q列を検索して日付行を特定
-    date_str = data["date"]  # 例: "5/26"
-    q_col_values = worksheet.col_values(17)  # Q列 = 17番目
+    date_str = data["date"]
+    q_col_values = worksheet.col_values(17)
 
     row_n = None
     for i, cell_val in enumerate(q_col_values, start=1):
@@ -324,40 +411,30 @@ def write_to_spreadsheet(data: dict) -> str:
             break
 
     if row_n is None:
-        raise ValueError(
-            f"タブ「{tab_name}」のQ列に「{date_str}」が見つかりませんでした。"
-        )
-
-    # セル書き込み（バッチ）
-    updates = []
+        raise ValueError(f"タブ「{tab_name}」のQ列に「{date_str}」が見つかりませんでした。")
 
     def cell(col_letter: str, row: int) -> str:
         return f"{col_letter}{row}"
 
-    # 日付 Q(N)
+    updates = []
     updates.append({"range": cell("Q", row_n), "values": [[date_str]]})
-    # 体重 S(N)
     updates.append({"range": cell("S", row_n), "values": [[data.get("weight", "")]]})
 
-    # 朝食 S(N+3), U(N+3), W(N+3)
     bf = data.get("breakfast", {})
     updates.append({"range": cell("S", row_n + 3), "values": [[bf.get("P", "")]]})
     updates.append({"range": cell("U", row_n + 3), "values": [[bf.get("F", "")]]})
     updates.append({"range": cell("W", row_n + 3), "values": [[bf.get("C", "")]]})
 
-    # 昼食 S(N+4), U(N+4), W(N+4)
     lu = data.get("lunch", {})
     updates.append({"range": cell("S", row_n + 4), "values": [[lu.get("P", "")]]})
     updates.append({"range": cell("U", row_n + 4), "values": [[lu.get("F", "")]]})
     updates.append({"range": cell("W", row_n + 4), "values": [[lu.get("C", "")]]})
 
-    # 夜・間食 S(N+5), U(N+5), W(N+5)
     ds = data.get("dinner_snack", {})
     updates.append({"range": cell("S", row_n + 5), "values": [[ds.get("P", "")]]})
     updates.append({"range": cell("U", row_n + 5), "values": [[ds.get("F", "")]]})
     updates.append({"range": cell("W", row_n + 5), "values": [[ds.get("C", "")]]})
 
-    # 運動 Z(N+2), AA(N+2), AB(N+2) から1行ずつ
     exercises = data.get("exercise", [])
     for idx, ex in enumerate(exercises):
         r = row_n + 2 + idx
@@ -382,41 +459,29 @@ def index():
 @app.route("/upload", methods=["POST"])
 @basic_auth_required
 def upload():
-    # 複数ファイル（images[]）または単一ファイル（image）を受け付ける
     files = request.files.getlist("images") or request.files.getlist("image")
     files = [f for f in files if f and f.filename != ""]
 
     if not files:
         return jsonify({"success": False, "error": "画像ファイルが選択されていません。"}), 400
-
     if not GEMINI_API_KEY:
-        return jsonify({"success": False, "error": "GEMINI_API_KEY が設定されていません。Secretsを確認してください。"}), 500
+        return jsonify({"success": False, "error": "GEMINI_API_KEY が設定されていません。"}), 500
 
     image_list = [(f.read(), f.content_type or "image/jpeg") for f in files]
 
-    # 全画像を1回のGemini APIコールで解析（レート制限対策）
     try:
-        data = analyze_images_with_gemini(image_list)
+        if len(image_list) == 1:
+            # 1枚のみ：サマリー画像として処理（詳細なし）
+            summary = analyze_summary(image_list[0])
+            data = merge_results(summary, [])
+        else:
+            # 1枚目：サマリー、2枚目以降：食事詳細を1枚ずつ個別解析
+            summary = analyze_summary(image_list[0])
+            detail_list = [analyze_detail(img) for img in image_list[1:]]
+            data = merge_results(summary, detail_list)
     except Exception as e:
         return jsonify({"success": False, "error": f"AI解析エラー: {str(e)}"}), 500
 
-    # ── 夜・間食のPFCを逆算で確定（合計 - 朝食 - 昼食）────────────────
-    # Geminiの個別合算では端数誤差が出るため、1日合計から逆算して100%一致させる
-    try:
-        total_P = float(data.get("total_P") or 0)
-        total_F = float(data.get("total_F") or 0)
-        total_C = float(data.get("total_C") or 0)
-        bf = data.get("breakfast", {})
-        lu = data.get("lunch", {})
-        data["dinner_snack"] = {
-            "P": round(total_P - float(bf.get("P") or 0) - float(lu.get("P") or 0), 1),
-            "F": round(total_F - float(bf.get("F") or 0) - float(lu.get("F") or 0), 1),
-            "C": round(total_C - float(bf.get("C") or 0) - float(lu.get("C") or 0), 1),
-        }
-    except (TypeError, ValueError):
-        pass  # 数値変換失敗時はGemini抽出値をそのまま使用
-
-    # スプレッドシート書き込み
     try:
         tab_name = write_to_spreadsheet(data)
     except Exception as e:
@@ -440,10 +505,7 @@ def upload():
 @app.route("/test-connection")
 @basic_auth_required
 def test_connection():
-    """スプレッドシート接続テスト＆サービスアカウントメール確認用"""
     result = {}
-
-    # サービスアカウントのメールを取得
     if not GOOGLE_SERVICE_ACCOUNT_JSON:
         return jsonify({"success": False, "error": "GOOGLE_SERVICE_ACCOUNT_JSON が未設定です。"}), 500
     try:
@@ -452,10 +514,8 @@ def test_connection():
     except Exception as e:
         return jsonify({"success": False, "error": f"JSON解析エラー: {e}"}), 500
 
-    # Gemini APIキーの存在確認
     result["gemini_api_key_set"] = bool(GEMINI_API_KEY)
 
-    # スプレッドシートへの接続テスト
     try:
         scope = [
             "https://spreadsheets.google.com/feeds",
@@ -464,10 +524,9 @@ def test_connection():
         creds = ServiceAccountCredentials.from_json_keyfile_dict(sa_info, scope)
         gc = gspread.authorize(creds)
         spreadsheet = gc.open_by_url(SPREADSHEET_URL)
-        sheet_titles = [ws.title for ws in spreadsheet.worksheets()]
         result["success"] = True
         result["spreadsheet_title"] = spreadsheet.title
-        result["tabs"] = sheet_titles
+        result["tabs"] = [ws.title for ws in spreadsheet.worksheets()]
     except gspread.exceptions.APIError as e:
         result["success"] = False
         result["spreadsheet_error"] = f"APIError: {e.response.status_code} - {e.response.json()}"
