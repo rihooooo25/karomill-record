@@ -116,9 +116,13 @@ DETAIL_PROMPT = """これはカロミルアプリの食事詳細スクリーン�
 【数値抽出ルール】
 ・「食品名 100g（50%）」→ base_amount=100, base_unit="g", percentage=50
 ・「食品名 小さじ1杯4.6g（100%）」→ base_amount=4.6, base_unit="g", percentage=100
+・「食品名 小さじ1杯4.6g（50%）」→ base_amount=4.6, base_unit="g", percentage=50
+・「食品名 大さじ1杯13.5g（30%）」→ base_amount=13.5, base_unit="g", percentage=30
+・「食品名 Xml（50%）」→ base_amount=X, base_unit="ml", percentage=50
 ・「食品名 1個（100%）」→ base_amount=1, base_unit="個", percentage=100
 ・「食品名 1株（100%）」→ base_amount=1, base_unit="株", percentage=100
 ・「食品名（◯%）」で基準量の記載なし → base_amount=null, base_unit="pct_only", percentage=◯
+・重要：「小さじN杯Xg」「大さじN杯Xg」のようにg値が明記されている場合は必ずbase_amount=そのg値、base_unit="g"で抽出すること
 ・P・F・C値：画像に表示されている数値をそのまま抽出（%適用前の値）
 ・数値が読み取れない場合は0
 
@@ -238,14 +242,14 @@ def calc_actual_pfc(item: dict) -> tuple:
 
 def format_amount(base_amount, base_unit: str, percentage: float) -> str:
     """表示用の分量文字列を生成"""
-    if base_unit == "pct_only":
-        return f"({int(percentage)}%)"
-    if base_amount is None:
+    if base_unit == "pct_only" or base_amount is None:
+        # 基準量なし → グラム計算不可のため表示なし
         return ""
     if base_unit in COUNT_UNITS:
         amt = int(base_amount) if float(base_amount) == int(float(base_amount)) else base_amount
         return f"{amt}{base_unit}"
     else:
+        # 基準量 × % = 実際の摂取量
         actual = float(base_amount) * percentage / 100
         amt = int(actual) if actual == int(actual) else round(actual, 1)
         return f"{amt}{base_unit}"
