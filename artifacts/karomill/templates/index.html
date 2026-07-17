@@ -290,6 +290,76 @@
     }
     #btn-copy.copied { background: var(--success); color: #fff; }
 
+    /* ─── 使い方セクション ─── */
+    .rules-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px;
+      width: 100%;
+      max-width: 420px;
+      margin-bottom: 16px;
+    }
+    .rules-card summary {
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--text);
+      cursor: pointer;
+      list-style: none;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .rules-card summary::-webkit-details-marker { display: none; }
+    .rules-card summary::after {
+      content: '▼';
+      font-size: 10px;
+      color: var(--text-muted);
+      margin-left: auto;
+      transition: transform 0.2s;
+    }
+    .rules-card[open] summary::after { transform: rotate(180deg); }
+    .rules-body {
+      margin-top: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .rules-group-title {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--accent);
+      margin-bottom: 6px;
+      letter-spacing: 0.05em;
+    }
+    .rules-list {
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .rules-list li {
+      font-size: 13px;
+      color: var(--text-muted);
+      line-height: 1.55;
+      padding-left: 18px;
+      position: relative;
+    }
+    .rules-list li::before {
+      content: attr(data-num);
+      position: absolute;
+      left: 0;
+      color: var(--accent);
+      font-weight: 700;
+      font-size: 12px;
+    }
+    .rules-list li strong { color: var(--text); }
+    .rules-divider {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 0;
+    }
+
     /* リセットボタン */
     #btn-reset {
       display: none;
@@ -318,6 +388,53 @@
       📊 スプレッドシートを確認する
     </a>
   </header>
+
+  <!-- 使い方・ルール -->
+  <details class="rules-card">
+    <summary>📖 正しく動作させるためのルール</summary>
+    <div class="rules-body">
+
+      <div>
+        <div class="rules-group-title">📌 画像の送り方</div>
+        <ul class="rules-list">
+          <li data-num="1"><strong>1枚目は必ずサマリー画像</strong>（1日の合計栄養素・体重・睡眠が表示されているページ）</li>
+          <li data-num="2"><strong>2枚目以降は食事詳細画像</strong>（朝食・昼食・夕食・間食の食品一覧）</li>
+          <li data-num="3">送る順番：<strong>サマリー → 朝食 → 昼食 → 夕食</strong>（間食は夕食と同じ画像でもOK）</li>
+        </ul>
+      </div>
+
+      <hr class="rules-divider" />
+
+      <div>
+        <div class="rules-group-title">📌 1回の送信ルール</div>
+        <ul class="rules-list">
+          <li data-num="4"><strong>1日分のみ</strong>送る（複数日を1回に混ぜない）</li>
+          <li data-num="5">サマリー画像は<strong>1枚だけ</strong>（2枚送ると誤動作する）</li>
+        </ul>
+      </div>
+
+      <hr class="rules-divider" />
+
+      <div>
+        <div class="rules-group-title">📌 画像の品質</div>
+        <ul class="rules-list">
+          <li data-num="6"><strong>スクリーンショットで送る</strong>（カメラで画面を撮影しない）</li>
+          <li data-num="7">文字がはっきり見えるものを使う（ぼやけていると読み取りエラーになる）</li>
+        </ul>
+      </div>
+
+      <hr class="rules-divider" />
+
+      <div>
+        <div class="rules-group-title">📌 処理中の注意</div>
+        <ul class="rules-list">
+          <li data-num="8">送信後は<strong>画面を閉じない</strong>（処理中に閉じると結果が消える）</li>
+          <li data-num="9">画像が多いほど時間がかかる（目安：<strong>4枚で30〜60秒</strong>）</li>
+        </ul>
+      </div>
+
+    </div>
+  </details>
 
   <div class="card">
 
