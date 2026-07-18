@@ -603,7 +603,14 @@
       let json;
       try {
         const resp = await fetch('/upload', { method: 'POST', body: fd });
-        json = await resp.json();
+        const contentType = resp.headers.get('content-type') || '';
+        if (contentType.includes('application/json')) {
+          json = await resp.json();
+        } else {
+          const text = await resp.text();
+          json = { success: false, error: `サーバーエラー (HTTP ${resp.status})。画像を確認して再送してください。` };
+          console.error('Non-JSON response:', text);
+        }
       } catch (err) {
         json = { success: false, error: 'ネットワークエラー: ' + err.message };
       }

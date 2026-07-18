@@ -454,6 +454,14 @@ def write_to_spreadsheet(data: dict) -> str:
 # ルート
 # ─────────────────────────────────────────────
 
+@app.errorhandler(Exception)
+def handle_exception(e):
+    return jsonify({"success": False, "error": f"サーバーエラー: {str(e)}"}), 500
+
+@app.errorhandler(404)
+def handle_404(e):
+    return jsonify({"success": False, "error": "ページが見つかりません。"}), 404
+
 @app.route("/")
 @basic_auth_required
 def index():
