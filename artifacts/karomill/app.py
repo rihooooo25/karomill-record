@@ -307,11 +307,45 @@ def analyze_video(video_bytes: bytes, mime_type: str) -> dict:
         if "FAILED" in str(video_file.state):
             raise RuntimeError("動画のGemini処理に失敗しました。別の動画で試してください。")
 
-        response = client.models.generate_content(
-            model=GEMINI_MODEL_CHAIN[0],
-            contents=[video_file, VIDEO_PROMPT],
-        )
-        raw = extract_json(response.text)
+        # call_gemini と同じフォールバックチェーンで生成
+        last_error = None
+        response_text = None
+        tried_models = []
+        for model in GEMINI_MODEL_CHAIN:
+            tried_models.append(model)
+            per_minute_retried = False
+            for _ in range(2):
+                try:
+                    resp = client.models.generate_content(
+                        model=model,
+                        contents=[video_file, VIDEO_PROMPT],
+                    )
+                    response_text = resp.text
+                    break
+                except Exception as e:
+                    err_str = str(e)
+                    last_error = e
+                    is_quota = "429" in err_str or "RESOURCE_EXHAUSTED" in err_str
+                    if not is_quota:
+                        raise
+                    if _is_skip_model_error(err_str):
+                        break
+                    if not per_minute_retried:
+                        per_minute_retried = True
+                        time.sleep(_parse_retry_delay(err_str))
+                        continue
+                    else:
+                        break
+            if response_text is not None:
+                break
+
+        if response_text is None:
+            tried = ", ".join(tried_models)
+            raise RuntimeError(
+                f"すべてのモデルでクォータが枯渇（試行: {tried}）。しばらく時間をおいて再試行してください。\n詳細: {last_error}"
+            )
+
+        raw = extract_json(response_text)
 
         # サマリー部分とメール詳細部分に分割してmerge_resultsへ渡す
         summary = {
