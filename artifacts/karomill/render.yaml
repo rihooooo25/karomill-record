@@ -4,7 +4,7 @@ services:
     runtime: python
     rootDir: artifacts/karomill
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 2
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 2 --timeout 300
     envVars:
       - key: GEMINI_API_KEY
         sync: false          # Renderダッシュボードで手動設定

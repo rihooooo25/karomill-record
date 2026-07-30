@@ -19,6 +19,7 @@ from functools import wraps
 # 設定
 # ─────────────────────────────────────────────
 app = Flask(__name__)
+app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024  # 200MB上限（動画対応）
 
 # ─────────────────────────────────────────────
 # Basic認証
