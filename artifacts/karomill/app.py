@@ -643,6 +643,7 @@ def index():
 def upload():
     files = request.files.getlist("images") or request.files.getlist("image")
     files = [f for f in files if f and f.filename != ""]
+    user_date = request.form.get("date", "").strip()  # "M/D" 形式
 
     if not files:
         return jsonify({"success": False, "error": "画像ファイルが選択されていません。"}), 400
@@ -663,6 +664,10 @@ def upload():
             data = merge_results(summary, detail_list)
     except Exception as e:
         return jsonify({"success": False, "error": f"AI解析エラー: {str(e)}"}), 500
+
+    # ユーザー選択日付で上書き（AIの読み取り結果より優先）
+    if user_date:
+        data["date"] = user_date
 
     try:
         tab_name = write_to_spreadsheet(data)
@@ -688,6 +693,7 @@ def upload():
 @basic_auth_required
 def upload_video():
     f = request.files.get("video")
+    user_date = request.form.get("date", "").strip()  # "M/D" 形式
     if not f or f.filename == "":
         return jsonify({"success": False, "error": "動画ファイルが選択されていません。"}), 400
     if not GEMINI_API_KEY:
@@ -697,6 +703,10 @@ def upload_video():
         data = analyze_video(f.read(), f.content_type or "video/mp4")
     except Exception as e:
         return jsonify({"success": False, "error": f"AI解析エラー: {str(e)}"}), 500
+
+    # ユーザー選択日付で上書き（AIの読み取り結果より優先）
+    if user_date:
+        data["date"] = user_date
 
     try:
         tab_name = write_to_spreadsheet(data)

@@ -360,6 +360,40 @@
       margin: 0;
     }
 
+    /* ─── 日付選択 ─── */
+    .date-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px 16px;
+      margin-bottom: 16px;
+    }
+    .date-row label {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text-muted);
+      white-space: nowrap;
+    }
+    .date-row input[type="date"] {
+      flex: 1;
+      background: transparent;
+      border: none;
+      outline: none;
+      color: var(--text);
+      font-size: 15px;
+      font-weight: 700;
+      font-family: inherit;
+      cursor: pointer;
+      text-align: right;
+    }
+    .date-row input[type="date"]::-webkit-calendar-picker-indicator {
+      filter: invert(0.7);
+      cursor: pointer;
+    }
+
     /* ─── タブ ─── */
     .tab-bar {
       display: flex;
@@ -507,6 +541,12 @@
 
   <div class="card">
 
+    <!-- 日付選択 -->
+    <div class="date-row">
+      <label for="record-date">📅 記録日</label>
+      <input type="date" id="record-date" />
+    </div>
+
     <!-- タブ切り替え -->
     <div class="tab-bar">
       <button class="tab-btn active" id="tab-image">📷 画像</button>
@@ -565,6 +605,24 @@
   </div>
 
   <script>
+    // ── 日付ピッカー初期値（今日） ───────────
+    const recordDateInput = document.getElementById('record-date');
+    (function setDefaultDate() {
+      const t = new Date();
+      const y = t.getFullYear();
+      const m = String(t.getMonth() + 1).padStart(2, '0');
+      const d = String(t.getDate()).padStart(2, '0');
+      recordDateInput.value = `${y}-${m}-${d}`;
+    })();
+
+    function getSelectedDateMD() {
+      // "YYYY-MM-DD" → "M/D" 形式（スプレッドシート検索用）
+      const val = recordDateInput.value; // e.g. "2026-07-30"
+      if (!val) return '';
+      const [, m, d] = val.split('-');
+      return `${parseInt(m)}/${parseInt(d)}`; // "7/30"
+    }
+
     // ── 要素取得 ─────────────────────────────
     const tabImage      = document.getElementById('tab-image');
     const tabVideo      = document.getElementById('tab-video');
@@ -696,6 +754,7 @@
       setLoading(true, `AI解析中… (${selectedFiles.length}枚)`);
       const fd = new FormData();
       selectedFiles.forEach(({ file }) => fd.append('images', file));
+      fd.append('date', getSelectedDateMD());
       const json = await postForm('/upload', fd);
       setLoading(false);
       const statusIcon = json.success ? '✅' : '❌';
@@ -759,6 +818,7 @@
       setLoading(true, `動画アップロード中… (${sizeMB}MB) しばらくお待ちください`);
       const fd = new FormData();
       fd.append('video', selectedVideo);
+      fd.append('date', getSelectedDateMD());
       const json = await postForm('/upload-video', fd);
       setLoading(false);
       showResult(json);
