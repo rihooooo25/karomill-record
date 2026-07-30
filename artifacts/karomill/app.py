@@ -492,6 +492,24 @@ def build_gemini_text(summary: dict, meal_map: dict, pfc_map: dict, ds_pfc: dict
     return "\n".join(lines)
 
 
+def _fix_gemini_text_date(data: dict) -> None:
+    """data["date"] に合わせて _gemini_text 内の日付表示を修正する"""
+    date_str = data.get("date", "")
+    if not date_str or "_gemini_text" not in data:
+        return
+    try:
+        d = parse_record_date(date_str)
+        new_date_line = f"{d.month}月{d.day}日({WEEKDAYS[d.weekday()]})"
+    except Exception:
+        new_date_line = date_str
+    # 「M月D日(曜)」パターンを正しい日付で置換
+    data["_gemini_text"] = re.sub(
+        r'\d+月\d+日\([月火水木金土日]\)',
+        new_date_line,
+        data["_gemini_text"],
+    )
+
+
 def merge_results(summary: dict, detail_list: list) -> dict:
     """サマリーと詳細を統合してスプレッドシート書き込み用dictを返す"""
     # 食事種別ごとにまとめる
@@ -669,6 +687,7 @@ def upload():
     # ユーザー選択日付で上書き（AIの読み取り結果より優先）
     if user_date:
         data["date"] = user_date
+        _fix_gemini_text_date(data)  # 解析テキスト内の日付も修正
 
     try:
         tab_name = write_to_spreadsheet(data)
@@ -708,6 +727,7 @@ def upload_video():
     # ユーザー選択日付で上書き（AIの読み取り結果より優先）
     if user_date:
         data["date"] = user_date
+        _fix_gemini_text_date(data)  # 解析テキスト内の日付も修正
 
     try:
         tab_name = write_to_spreadsheet(data)
