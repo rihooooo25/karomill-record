@@ -266,23 +266,65 @@ def call_gemini(image_data: tuple, prompt: str) -> str:
     )
 
 
+def _sanitize_json_string(s: str) -> str:
+    """JSON文字列値内の未エスケープ制御文字（改行・タブ等）をエスケープする。
+    AIが string 値の中に生の改行を出力するケースへの対処。
+    """
+    result = []
+    in_string = False
+    escape_next = False
+    for ch in s:
+        if escape_next:
+            result.append(ch)
+            escape_next = False
+            continue
+        if ch == '\\':
+            result.append(ch)
+            escape_next = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            result.append(ch)
+            continue
+        if in_string:
+            if ch == '\n':
+                result.append('\\n')
+                continue
+            if ch == '\r':
+                result.append('\\r')
+                continue
+            if ch == '\t':
+                result.append('\\t')
+                continue
+        result.append(ch)
+    return ''.join(result)
+
+
+def _parse_json(raw: str) -> dict:
+    """json.loads を試み、失敗したらサニタイズして再試行する。"""
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return json.loads(_sanitize_json_string(raw))
+
+
 def extract_json(text: str) -> dict:
     """<<<JSON_START>>>...<<<JSON_END>>> からJSONを抽出。マーカーがない場合は生JSONをフォールバック解析。"""
     # ① マーカーあり（通常ケース）
     m = re.search(r"<<<JSON_START>>>(.*?)<<<JSON_END>>>", text, re.DOTALL)
     if m:
-        return json.loads(m.group(1).strip())
+        return _parse_json(m.group(1).strip())
 
     # ② マーカーなし：コードブロック内のJSONを試みる
     m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
     if m:
-        return json.loads(m.group(1).strip())
+        return _parse_json(m.group(1).strip())
 
     # ③ テキスト全体から最外部の { ... } を抽出して解析
     m = re.search(r"(\{.*\})", text, re.DOTALL)
     if m:
         try:
-            return json.loads(m.group(1).strip())
+            return _parse_json(m.group(1).strip())
         except json.JSONDecodeError:
             pass
 
