@@ -154,6 +154,8 @@ VIDEO_PROMPT = """これはカロミルアプリの画面録画動画です。
 ユーザーが帳尻合わせ画面・朝食・昼食・夕食・間食の画面をスクロールしながら録画しています。
 動画全体を通じてすべての画面から情報を正確に抽出し、下記JSONのみを出力してください。説明文は一切不要です。
 
+【絶対厳守】出力は必ず <<<JSON_START>>> で始まり <<<JSON_END>>> で終わること。マーカーを省略しないこと。
+
 【サマリー抽出ルール（帳尻合わせ画面）】
 ・日付：画面上部の「昨日 M/D (曜日)」または「M月D日(曜日)」から「M/D」形式で抽出
 ・体重：「栄養サマリー」カードの下部左側に単独で表示されている小数点1桁の数値（例：76.2）が体重(kg)。
@@ -264,11 +266,26 @@ def call_gemini(image_data: tuple, prompt: str) -> str:
 
 
 def extract_json(text: str) -> dict:
-    """<<<JSON_START>>>...<<<JSON_END>>> からJSONを抽出してdictを返す"""
+    """<<<JSON_START>>>...<<<JSON_END>>> からJSONを抽出。マーカーがない場合は生JSONをフォールバック解析。"""
+    # ① マーカーあり（通常ケース）
     m = re.search(r"<<<JSON_START>>>(.*?)<<<JSON_END>>>", text, re.DOTALL)
-    if not m:
-        raise ValueError(f"JSONを抽出できませんでした。Gemini応答:\n{text[:500]}")
-    return json.loads(m.group(1).strip())
+    if m:
+        return json.loads(m.group(1).strip())
+
+    # ② マーカーなし：コードブロック内のJSONを試みる
+    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if m:
+        return json.loads(m.group(1).strip())
+
+    # ③ テキスト全体から最外部の { ... } を抽出して解析
+    m = re.search(r"(\{.*\})", text, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group(1).strip())
+        except json.JSONDecodeError:
+            pass
+
+    raise ValueError(f"JSONを抽出できませんでした。Gemini応答:\n{text[:500]}")
 
 
 def analyze_summary(image_data: tuple) -> dict:
