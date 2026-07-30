@@ -5,6 +5,7 @@ import os
 import json
 import re
 import time
+import tempfile
 from datetime import datetime, date
 
 from google import genai
@@ -149,6 +150,64 @@ DETAIL_PROMPT = """これはカロミルアプリの食事詳細スクリーン�
 <<<JSON_END>>>"""
 
 
+VIDEO_PROMPT = """これはカロミルアプリの画面録画動画です。
+ユーザーが帳尻合わせ画面・朝食・昼食・夕食・間食の画面をスクロールしながら録画しています。
+動画全体を通じてすべての画面から情報を正確に抽出し、下記JSONのみを出力してください。説明文は一切不要です。
+
+【サマリー抽出ルール（帳尻合わせ画面）】
+・日付：画面上部の「昨日 M/D (曜日)」または「M月D日(曜日)」から「M/D」形式で抽出
+・体重：「栄養サマリー」カードの下部左側に単独で表示されている小数点1桁の数値（例：76.2）が体重(kg)。
+　　　　「/」の右側の目標値ではなく必ず左側の実績値を読み取ること。
+・睡眠：カード内の「HH:MM〜HH:MM」形式の時刻をそのまま抽出
+・合計栄養素：「カロリー ◯/◯kcal」の左の実績値を total_kcal に。たんぱく質・脂質・炭水化物も左の実績値のみ
+・下部の「P:31/24%」などのパーセンテージはグラム数ではないため total_P 等に絶対使用しないこと
+
+【食事詳細抽出ルール（朝食・昼食・夕食・間食画面）】
+・食品名のひらがな・カタカナ・漢字を一字一句そのまま書き起こすこと
+・特に以下の文字を混同しないよう注意：こ↔つ、ん↔じ、い↔り、あ↔お、ぬ↔め
+・ブランド名・販売元（by Amazon、みなさまのお墨付き 等）は削除
+・食材の状態（生・ゆで・乾・根・皮あり等）と味の種類は必ず残すこと
+・「食品名 100g（50%）」→ base_amount=100, base_unit="g", percentage=50
+・「食品名 小さじ1杯4.6g（50%）」→ base_amount=4.6, base_unit="g", percentage=50
+・「食品名 大さじ1杯13.5g（30%）」→ base_amount=13.5, base_unit="g", percentage=30
+・「食品名（◯%）」で基準量の記載なし → base_amount=null, base_unit="pct_only", percentage=◯
+・P・F・C値：画像に表示されている数値をそのまま抽出（%適用前の値）
+
+<<<JSON_START>>>
+{
+  "date": "M/D形式（例: 7/16）",
+  "weight": 数値のみ（例: 76.2）,
+  "sleep": "HH:MM〜HH:MM（例: 2:00〜8:00）、なければ空文字",
+  "total_kcal": 数値のみ,
+  "total_P": 数値のみ,
+  "total_F": 数値のみ,
+  "total_C": 数値のみ,
+  "self_evaluation": "自己評価テキスト（なければ空文字）",
+  "exercise_notes": "運動メモ原文（なければ空文字）",
+  "exercise": [
+    {"menu": "種目名", "reps": "回数や時間", "sets": "セット数（不明なら空文字）"}
+  ],
+  "meals": [
+    {
+      "type": "朝食|昼食|夕食|間食",
+      "time": "HH:MM（読み取れない場合は空文字）",
+      "items": [
+        {
+          "name": "整形済み食品名",
+          "base_amount": 数値またはnull,
+          "base_unit": "g|ml|個|本|枚|株|杯|缶|食|袋|pct_only",
+          "percentage": 数値（0〜100）,
+          "P": たんぱく質g（数値のみ、%適用前）,
+          "F": 脂質g（数値のみ、%適用前）,
+          "C": 炭水化物g（数値のみ、%適用前）
+        }
+      ]
+    }
+  ]
+}
+<<<JSON_END>>>"""
+
+
 # ─────────────────────────────────────────────
 # Gemini APIヘルパー
 # ─────────────────────────────────────────────
@@ -220,6 +279,66 @@ def analyze_summary(image_data: tuple) -> dict:
 def analyze_detail(image_data: tuple) -> dict:
     """食事詳細画像1枚を解析"""
     return extract_json(call_gemini(image_data, DETAIL_PROMPT))
+
+
+def analyze_video(video_bytes: bytes, mime_type: str) -> dict:
+    """MP4動画をGemini Files APIで解析してmerge_results済みdictを返す"""
+    client = genai.Client(api_key=GEMINI_API_KEY)
+
+    # 一時ファイルに書き出してアップロード
+    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+        f.write(video_bytes)
+        tmp_path = f.name
+
+    video_file = None
+    try:
+        video_file = client.files.upload(file=tmp_path)
+
+        # 処理完了を待機（最大90秒）
+        waited = 0
+        while waited < 90:
+            state_str = str(video_file.state)
+            if "PROCESSING" not in state_str:
+                break
+            time.sleep(3)
+            waited += 3
+            video_file = client.files.get(name=video_file.name)
+
+        if "FAILED" in str(video_file.state):
+            raise RuntimeError("動画のGemini処理に失敗しました。別の動画で試してください。")
+
+        response = client.models.generate_content(
+            model=GEMINI_MODEL_CHAIN[0],
+            contents=[video_file, VIDEO_PROMPT],
+        )
+        raw = extract_json(response.text)
+
+        # サマリー部分とメール詳細部分に分割してmerge_resultsへ渡す
+        summary = {
+            "date": raw.get("date", ""),
+            "weight": raw.get("weight"),
+            "sleep": raw.get("sleep", ""),
+            "total_kcal": raw.get("total_kcal"),
+            "total_P": raw.get("total_P"),
+            "total_F": raw.get("total_F"),
+            "total_C": raw.get("total_C"),
+            "self_evaluation": raw.get("self_evaluation", ""),
+            "exercise_notes": raw.get("exercise_notes", ""),
+            "exercise": raw.get("exercise", []),
+        }
+        detail_list = [{"meals": raw.get("meals", [])}]
+        return merge_results(summary, detail_list)
+
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+        if video_file:
+            try:
+                client.files.delete(name=video_file.name)
+            except Exception:
+                pass
 
 
 # ─────────────────────────────────────────────
@@ -491,6 +610,40 @@ def upload():
             summary = analyze_summary(image_list[0])
             detail_list = [analyze_detail(img) for img in image_list[1:]]
             data = merge_results(summary, detail_list)
+    except Exception as e:
+        return jsonify({"success": False, "error": f"AI解析エラー: {str(e)}"}), 500
+
+    try:
+        tab_name = write_to_spreadsheet(data)
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": f"スプレッドシート書き込みエラー: {str(e)}",
+            "gemini_text": data.get("_gemini_text", ""),
+            "data": {k: v for k, v in data.items() if k != "_gemini_text"},
+        }), 500
+
+    return jsonify({
+        "success": True,
+        "tab": tab_name,
+        "date": data.get("date"),
+        "weight": data.get("weight"),
+        "gemini_text": data.get("_gemini_text", ""),
+        "data": {k: v for k, v in data.items() if k != "_gemini_text"},
+    })
+
+
+@app.route("/upload-video", methods=["POST"])
+@basic_auth_required
+def upload_video():
+    f = request.files.get("video")
+    if not f or f.filename == "":
+        return jsonify({"success": False, "error": "動画ファイルが選択されていません。"}), 400
+    if not GEMINI_API_KEY:
+        return jsonify({"success": False, "error": "GEMINI_API_KEY が設定されていません。"}), 500
+
+    try:
+        data = analyze_video(f.read(), f.content_type or "video/mp4")
     except Exception as e:
         return jsonify({"success": False, "error": f"AI解析エラー: {str(e)}"}), 500
 

@@ -360,6 +360,80 @@
       margin: 0;
     }
 
+    /* ─── タブ ─── */
+    .tab-bar {
+      display: flex;
+      background: var(--surface);
+      border-radius: 10px;
+      padding: 4px;
+      margin-bottom: 20px;
+      gap: 4px;
+    }
+    .tab-btn {
+      flex: 1;
+      padding: 10px;
+      border: none;
+      border-radius: 8px;
+      background: transparent;
+      color: var(--text-muted);
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s, color 0.2s;
+    }
+    .tab-btn.active {
+      background: var(--card);
+      color: var(--text);
+      box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+    }
+
+    /* ─── 動画アップロード ─── */
+    .upload-zone-video {
+      border: 2px dashed var(--border);
+      border-radius: 12px;
+      padding: 32px 16px;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color 0.2s, background 0.2s;
+      position: relative;
+      overflow: hidden;
+    }
+    .upload-zone-video:hover, .upload-zone-video.drag-over {
+      border-color: var(--accent2);
+      background: rgba(108,99,255,0.05);
+    }
+    .upload-zone-video input[type="file"] {
+      position: absolute; inset: 0; opacity: 0; cursor: pointer;
+    }
+    #video-selected {
+      display: none;
+      margin-top: 12px;
+      padding: 10px 14px;
+      background: var(--surface);
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      font-size: 13px;
+      color: var(--text-muted);
+      align-items: center;
+      gap: 8px;
+    }
+    #video-selected .video-name {
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--text);
+    }
+    #video-clear {
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 18px;
+      padding: 0 4px;
+      line-height: 1;
+    }
+
     /* リセットボタン */
     #btn-reset {
       display: none;
@@ -395,41 +469,36 @@
     <div class="rules-body">
 
       <div>
-        <div class="rules-group-title">📌 画像の送り方</div>
+        <div class="rules-group-title">📷 画像モードの送り方</div>
         <ul class="rules-list">
           <li data-num="1"><strong>1枚目は必ずサマリー画像</strong>（1日の合計栄養素・体重・睡眠が表示されているページ）</li>
           <li data-num="2"><strong>2枚目以降は食事詳細画像</strong>（朝食・昼食・夕食・間食の食品一覧）</li>
           <li data-num="3">送る順番：<strong>サマリー → 朝食 → 昼食 → 夕食</strong>（間食は夕食と同じ画像でもOK）</li>
+          <li data-num="4"><strong>1日分のみ</strong>送る／サマリー画像は<strong>1枚だけ</strong></li>
+          <li data-num="5"><strong>スクリーンショットで送る</strong>（カメラで画面を撮影しない）</li>
         </ul>
       </div>
 
       <hr class="rules-divider" />
 
       <div>
-        <div class="rules-group-title">📌 1回の送信ルール</div>
+        <div class="rules-group-title">🎥 動画モードの送り方</div>
         <ul class="rules-list">
-          <li data-num="4"><strong>1日分のみ</strong>送る（複数日を1回に混ぜない）</li>
-          <li data-num="5">サマリー画像は<strong>1枚だけ</strong>（2枚送ると誤動作する）</li>
+          <li data-num="1">サマリー画面（合計栄養素・体重・睡眠）を表示してから録画開始</li>
+          <li data-num="2">そのまま<strong>朝食 → 昼食 → 夕食</strong>の順にスクロールして撮影</li>
+          <li data-num="3">各画面で<strong>1〜2秒止まる</strong>（文字が読み取りやすくなる）</li>
+          <li data-num="4"><strong>1日分を1本</strong>の動画に収める（複数日混在NG）</li>
+          <li data-num="5">形式：<strong>MP4</strong>／目安：10〜60秒・10MB前後</li>
         </ul>
       </div>
 
       <hr class="rules-divider" />
 
       <div>
-        <div class="rules-group-title">📌 画像の品質</div>
+        <div class="rules-group-title">📌 共通の注意</div>
         <ul class="rules-list">
-          <li data-num="6"><strong>スクリーンショットで送る</strong>（カメラで画面を撮影しない）</li>
-          <li data-num="7">文字がはっきり見えるものを使う（ぼやけていると読み取りエラーになる）</li>
-        </ul>
-      </div>
-
-      <hr class="rules-divider" />
-
-      <div>
-        <div class="rules-group-title">📌 処理中の注意</div>
-        <ul class="rules-list">
-          <li data-num="8">送信後は<strong>画面を閉じない</strong>（処理中に閉じると結果が消える）</li>
-          <li data-num="9">画像が多いほど時間がかかる（目安：<strong>4枚で30〜60秒</strong>）</li>
+          <li data-num="6">送信後は<strong>画面を閉じない</strong>（処理中に閉じると結果が消える）</li>
+          <li data-num="7">動画は画像より処理時間が長い（目安：<strong>1〜2分</strong>）</li>
         </ul>
       </div>
 
@@ -438,33 +507,51 @@
 
   <div class="card">
 
-    <!-- 画像選択 -->
-    <div class="upload-zone" id="upload-zone">
-      <input type="file" id="file-input" accept="image/*" multiple />
-      <span class="icon">📷</span>
-      <span class="label">スクショを選択（複数可）</span>
-      <span class="sub">カロミルの食事・体重スクリーンショット</span>
+    <!-- タブ切り替え -->
+    <div class="tab-bar">
+      <button class="tab-btn active" id="tab-image">📷 画像</button>
+      <button class="tab-btn" id="tab-video">🎥 動画</button>
     </div>
 
-    <!-- プレビュー（複数サムネイル） -->
-    <div id="preview-wrap">
-      <div id="preview-grid"></div>
-      <button id="preview-clear-all">すべてクリア</button>
+    <!-- ── 画像モード ── -->
+    <div id="pane-image">
+      <div class="upload-zone" id="upload-zone">
+        <input type="file" id="file-input" accept="image/*" multiple />
+        <span class="icon">📷</span>
+        <span class="label">スクショを選択（複数可）</span>
+        <span class="sub">カロミルの食事・体重スクリーンショット</span>
+      </div>
+      <div id="preview-wrap">
+        <div id="preview-grid"></div>
+        <button id="preview-clear-all">すべてクリア</button>
+      </div>
+      <button class="btn-send" id="btn-send" disabled>送信・記録する</button>
     </div>
 
-    <!-- 送信ボタン -->
-    <button class="btn-send" id="btn-send" disabled>送信・記録する</button>
+    <!-- ── 動画モード ── -->
+    <div id="pane-video" style="display:none">
+      <div class="upload-zone-video" id="upload-zone-video">
+        <input type="file" id="video-input" accept="video/mp4,video/*" />
+        <span class="icon">🎥</span>
+        <span class="label">MP4動画を選択</span>
+        <span class="sub">カロミルをスクロール録画した動画（10MB程度）</span>
+      </div>
+      <div id="video-selected">
+        <span>🎬</span>
+        <span class="video-name" id="video-name"></span>
+        <button id="video-clear">✕</button>
+      </div>
+      <button class="btn-send" id="btn-send-video" disabled>送信・記録する</button>
+    </div>
 
-    <!-- ローディング -->
+    <!-- ── 共通：ローディング・結果・リセット ── -->
     <div id="loading">
       <div class="spinner"></div>
       <div id="loading-text">AI解析中...</div>
     </div>
 
-    <!-- 結果 -->
     <div id="result"></div>
 
-    <!-- Gemini出力（折りたたみ） -->
     <details id="gemini-output">
       <summary>📋 AIの解析テキストを表示</summary>
       <div class="gemini-text-wrap">
@@ -473,18 +560,31 @@
       </div>
     </details>
 
-    <!-- リセット -->
-    <button id="btn-reset">↩ 別の画像を送る</button>
+    <button id="btn-reset">↩ 別のファイルを送る</button>
 
   </div>
 
   <script>
+    // ── 要素取得 ─────────────────────────────
+    const tabImage      = document.getElementById('tab-image');
+    const tabVideo      = document.getElementById('tab-video');
+    const paneImage     = document.getElementById('pane-image');
+    const paneVideo     = document.getElementById('pane-video');
+
     const fileInput     = document.getElementById('file-input');
     const uploadZone    = document.getElementById('upload-zone');
     const previewWrap   = document.getElementById('preview-wrap');
     const previewGrid   = document.getElementById('preview-grid');
     const previewClearAll = document.getElementById('preview-clear-all');
     const btnSend       = document.getElementById('btn-send');
+
+    const videoInput    = document.getElementById('video-input');
+    const uploadZoneVideo = document.getElementById('upload-zone-video');
+    const videoSelected = document.getElementById('video-selected');
+    const videoNameEl   = document.getElementById('video-name');
+    const videoClear    = document.getElementById('video-clear');
+    const btnSendVideo  = document.getElementById('btn-send-video');
+
     const loading       = document.getElementById('loading');
     const loadingText   = document.getElementById('loading-text');
     const resultDiv     = document.getElementById('result');
@@ -493,13 +593,26 @@
     const btnCopy       = document.getElementById('btn-copy');
     const btnReset      = document.getElementById('btn-reset');
 
-    // ── コピーボタン ────────────────────────────
+    // ── タブ切り替え ─────────────────────────
+    tabImage.addEventListener('click', () => {
+      tabImage.classList.add('active');
+      tabVideo.classList.remove('active');
+      paneImage.style.display = 'block';
+      paneVideo.style.display = 'none';
+    });
+    tabVideo.addEventListener('click', () => {
+      tabVideo.classList.add('active');
+      tabImage.classList.remove('active');
+      paneVideo.style.display = 'block';
+      paneImage.style.display = 'none';
+    });
+
+    // ── コピーボタン ─────────────────────────
     btnCopy.addEventListener('click', async () => {
       const text = geminiPre.textContent;
       try {
         await navigator.clipboard.writeText(text);
       } catch {
-        // fallback
         const ta = document.createElement('textarea');
         ta.value = text;
         ta.style.position = 'fixed'; ta.style.opacity = '0';
@@ -515,10 +628,11 @@
       }, 2000);
     });
 
-    // 選択ファイル一覧 [{file, objectUrl}]
+    // ════════════════════════════════════════
+    // 画像モード
+    // ════════════════════════════════════════
     let selectedFiles = [];
 
-    // ── ファイル追加 ──────────────────────────
     function addFiles(newFiles) {
       for (const f of newFiles) {
         if (!f.type.startsWith('image/')) continue;
@@ -530,13 +644,9 @@
 
     fileInput.addEventListener('change', e => {
       addFiles(Array.from(e.target.files));
-      fileInput.value = ''; // 同じファイルを再選択できるようリセット
+      fileInput.value = '';
     });
-
-    uploadZone.addEventListener('dragover', e => {
-      e.preventDefault();
-      uploadZone.classList.add('drag-over');
-    });
+    uploadZone.addEventListener('dragover', e => { e.preventDefault(); uploadZone.classList.add('drag-over'); });
     uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('drag-over'));
     uploadZone.addEventListener('drop', e => {
       e.preventDefault();
@@ -544,7 +654,6 @@
       addFiles(Array.from(e.dataTransfer.files));
     });
 
-    // ── サムネイル描画 ───────────────────────
     function renderThumbs() {
       previewGrid.innerHTML = '';
       selectedFiles.forEach((item, idx) => {
@@ -560,8 +669,6 @@
       resultDiv.style.display = 'none';
       geminiOut.style.display = 'none';
       btnReset.style.display = 'none';
-
-      // 削除ボタン
       previewGrid.querySelectorAll('.thumb-remove').forEach(btn => {
         btn.addEventListener('click', e => {
           const i = parseInt(e.currentTarget.dataset.idx);
@@ -573,117 +680,155 @@
       });
     }
 
-    previewClearAll.addEventListener('click', reset);
+    previewClearAll.addEventListener('click', resetImage);
+    function updateSendBtn() { btnSend.disabled = selectedFiles.length === 0; }
 
-    function updateSendBtn() {
-      btnSend.disabled = selectedFiles.length === 0;
-    }
-
-    // ── 送信（全画像を1回のリクエストにまとめて送信）──────
     btnSend.addEventListener('click', async () => {
       if (selectedFiles.length === 0) return;
-
       btnSend.disabled = true;
       resultDiv.style.display = 'none';
       geminiOut.style.display = 'none';
       btnReset.style.display = 'none';
-
-      // 全サムネイルを「解析中」表示
       selectedFiles.forEach((_, i) => {
         const s = document.getElementById(`thumb-status-${i}`);
         if (s) s.textContent = '⏳';
       });
-
-      setLoading(true, `AI解析中… (${selectedFiles.length}枚まとめて処理)`);
-
-      // 全画像を images[] として1リクエストにまとめる
+      setLoading(true, `AI解析中… (${selectedFiles.length}枚)`);
       const fd = new FormData();
       selectedFiles.forEach(({ file }) => fd.append('images', file));
-
-      let json;
-      try {
-        const resp = await fetch('/upload', { method: 'POST', body: fd });
-        const contentType = resp.headers.get('content-type') || '';
-        if (contentType.includes('application/json')) {
-          json = await resp.json();
-        } else {
-          const text = await resp.text();
-          json = { success: false, error: `サーバーエラー (HTTP ${resp.status})。画像を確認して再送してください。` };
-          console.error('Non-JSON response:', text);
-        }
-      } catch (err) {
-        json = { success: false, error: 'ネットワークエラー: ' + err.message };
-      }
-
+      const json = await postForm('/upload', fd);
       setLoading(false);
-
-      // 全サムネイルに結果を反映
       const statusIcon = json.success ? '✅' : '❌';
       selectedFiles.forEach((_, i) => {
         const s = document.getElementById(`thumb-status-${i}`);
         if (s) s.textContent = statusIcon;
       });
-
-      showResults([json]);
-
-      if (json.gemini_text) {
-        geminiOut.style.display = 'block';
-        geminiPre.textContent = json.gemini_text;
-      }
+      showResult(json);
     });
 
-    btnReset.addEventListener('click', reset);
-
-    // ── ローディング ─────────────────────────
-    function setLoading(on, text) {
-      loading.style.display = on ? 'block' : 'none';
-      loadingText.textContent = text || '';
-    }
-
-    // ── 結果表示 ─────────────────────────────
-    function showResults(results) {
-      resultDiv.style.display = 'block';
-      btnReset.style.display = 'block';
-
-      const sheetUrl = 'https://docs.google.com/spreadsheets/d/1z9PX6D_zbd1fhDDATzOOZNlLd3Ux1eMchoDBrMi7qCA/edit?usp=drivesdk';
-      const html = results.map((json, i) => {
-        if (json.success) {
-          return `<div class="result-box success" style="margin-bottom:10px">
-            <div class="result-title">✅ 記録完了！</div>
-            <div>タブ: <strong>${json.tab}</strong></div>
-            <div>日付: <strong>${json.date}</strong> / 体重: <strong>${json.weight} kg</strong></div>
-            <a class="btn-sheet" href="${sheetUrl}" target="_blank" rel="noopener noreferrer"
-               style="margin-top:10px;">
-              📊 スプレッドシートを確認する
-            </a>
-          </div>`;
-        } else {
-          return `<div class="result-box error" style="margin-bottom:10px">
-            <div class="result-title">❌ 画像${i+1} エラー</div>
-            <div>${escHtml(json.error || '不明なエラー')}</div>
-          </div>`;
-        }
-      }).join('');
-
-      resultDiv.innerHTML = html;
-    }
-
-    function escHtml(s) {
-      return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-    }
-
-    function reset() {
+    function resetImage() {
       selectedFiles.forEach(f => URL.revokeObjectURL(f.objectUrl));
       selectedFiles = [];
       fileInput.value = '';
       previewGrid.innerHTML = '';
       previewWrap.style.display = 'none';
       btnSend.disabled = true;
+    }
+
+    // ════════════════════════════════════════
+    // 動画モード
+    // ════════════════════════════════════════
+    let selectedVideo = null;
+
+    videoInput.addEventListener('change', e => {
+      const f = e.target.files[0];
+      if (!f) return;
+      selectedVideo = f;
+      videoNameEl.textContent = f.name;
+      videoSelected.style.display = 'flex';
+      btnSendVideo.disabled = false;
+      resultDiv.style.display = 'none';
+      geminiOut.style.display = 'none';
+      btnReset.style.display = 'none';
+      videoInput.value = '';
+    });
+
+    uploadZoneVideo.addEventListener('dragover', e => { e.preventDefault(); uploadZoneVideo.classList.add('drag-over'); });
+    uploadZoneVideo.addEventListener('dragleave', () => uploadZoneVideo.classList.remove('drag-over'));
+    uploadZoneVideo.addEventListener('drop', e => {
+      e.preventDefault();
+      uploadZoneVideo.classList.remove('drag-over');
+      const f = e.dataTransfer.files[0];
+      if (f && f.type.startsWith('video/')) {
+        selectedVideo = f;
+        videoNameEl.textContent = f.name;
+        videoSelected.style.display = 'flex';
+        btnSendVideo.disabled = false;
+      }
+    });
+
+    videoClear.addEventListener('click', resetVideo);
+
+    btnSendVideo.addEventListener('click', async () => {
+      if (!selectedVideo) return;
+      btnSendVideo.disabled = true;
+      resultDiv.style.display = 'none';
+      geminiOut.style.display = 'none';
+      btnReset.style.display = 'none';
+      const sizeMB = (selectedVideo.size / 1024 / 1024).toFixed(1);
+      setLoading(true, `動画アップロード中… (${sizeMB}MB) しばらくお待ちください`);
+      const fd = new FormData();
+      fd.append('video', selectedVideo);
+      const json = await postForm('/upload-video', fd);
+      setLoading(false);
+      showResult(json);
+    });
+
+    function resetVideo() {
+      selectedVideo = null;
+      videoNameEl.textContent = '';
+      videoSelected.style.display = 'none';
+      btnSendVideo.disabled = true;
+    }
+
+    // ════════════════════════════════════════
+    // 共通ユーティリティ
+    // ════════════════════════════════════════
+    async function postForm(url, formData) {
+      try {
+        const resp = await fetch(url, { method: 'POST', body: formData });
+        const ct = resp.headers.get('content-type') || '';
+        if (ct.includes('application/json')) return await resp.json();
+        const text = await resp.text();
+        console.error('Non-JSON response:', text);
+        return { success: false, error: `サーバーエラー (HTTP ${resp.status})。再送してください。` };
+      } catch (err) {
+        return { success: false, error: 'ネットワークエラー: ' + err.message };
+      }
+    }
+
+    function setLoading(on, text) {
+      loading.style.display = on ? 'block' : 'none';
+      loadingText.textContent = text || '';
+    }
+
+    function showResult(json) {
+      const sheetUrl = 'https://docs.google.com/spreadsheets/d/1z9PX6D_zbd1fhDDATzOOZNlLd3Ux1eMchoDBrMi7qCA/edit?usp=drivesdk';
+      resultDiv.style.display = 'block';
+      btnReset.style.display = 'block';
+      if (json.success) {
+        resultDiv.innerHTML = `<div class="result-box success">
+          <div class="result-title">✅ 記録完了！</div>
+          <div>タブ: <strong>${json.tab}</strong></div>
+          <div>日付: <strong>${json.date}</strong> / 体重: <strong>${json.weight} kg</strong></div>
+          <a class="btn-sheet" href="${sheetUrl}" target="_blank" rel="noopener noreferrer" style="margin-top:10px;">
+            📊 スプレッドシートを確認する
+          </a>
+        </div>`;
+      } else {
+        resultDiv.innerHTML = `<div class="result-box error">
+          <div class="result-title">❌ エラー</div>
+          <div>${escHtml(json.error || '不明なエラー')}</div>
+        </div>`;
+      }
+      if (json.gemini_text) {
+        geminiOut.style.display = 'block';
+        geminiPre.textContent = json.gemini_text;
+      }
+    }
+
+    function escHtml(s) {
+      return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+
+    btnReset.addEventListener('click', () => {
+      resetImage();
+      resetVideo();
       resultDiv.style.display = 'none';
       geminiOut.style.display = 'none';
       btnReset.style.display = 'none';
       loading.style.display = 'none';
-    }
+    });
   </script>
 </body>
 </html>
