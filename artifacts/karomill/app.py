@@ -135,8 +135,8 @@ STEP8: 自己評価・運動
 <<<JSON_START>>>
 {
   "date": "M/D形式（例: 7/16）",
-  "weight": 数値のみ（例: 76.2）またはnull,
-  "sleep": "HH:MM〜HH:MM（例: 22:30〜7:00）またはnull",
+  "weight": 数値のみ（例: 76.2）,
+  "sleep": "HH:MM〜HH:MM（例: 22:30〜7:00）、なければ空文字",
   "total_kcal": 数値のみ,
   "total_P": 数値のみ,
   "total_F": 数値のみ,
@@ -358,12 +358,38 @@ def _sanitize_json_string(s: str) -> str:
     return ''.join(result)
 
 
+def _remove_trailing_commas(s: str) -> str:
+    """JSON内の末尾カンマ（Geminiが頻出させる）を除去する。例: [1,2,] → [1,2]"""
+    return re.sub(r',(\s*[}\]])', r'\1', s)
+
+
 def _parse_json(raw: str) -> dict:
-    """json.loads を試み、失敗したらサニタイズして再試行する。"""
+    """json.loads を試み、失敗したら段階的に修復して再試行する。"""
+    # ステップ1: そのまま試す
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
-        return json.loads(_sanitize_json_string(raw))
+        pass
+    # ステップ2: 末尾カンマ除去
+    cleaned = _remove_trailing_commas(raw)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+    # ステップ3: 文字列内制御文字エスケープ + 末尾カンマ除去
+    return json.loads(_remove_trailing_commas(_sanitize_json_string(raw)))
+
+
+def _to_float(val, default: float = 0.0) -> float:
+    """Gemini出力を安全にfloatへ変換する。None・単位付き文字列・"null"文字列に対応。"""
+    if val is None:
+        return default
+    try:
+        # 数字・小数点・マイナス以外を除去してからfloat変換
+        cleaned = re.sub(r'[^\d.\-]', '', str(val))
+        return float(cleaned) if cleaned else default
+    except (ValueError, TypeError):
+        return default
 
 
 def extract_json(text: str) -> dict:
@@ -623,9 +649,9 @@ def merge_results(summary: dict, detail_list: list) -> dict:
     pfc_map = {mt: sum_pfc(meals) for mt, meals in meal_map.items()}
 
     # 夜・間食を逆算（合計 - 朝食 - 昼食）
-    total_P = float(summary.get("total_P") or 0)
-    total_F = float(summary.get("total_F") or 0)
-    total_C = float(summary.get("total_C") or 0)
+    total_P = _to_float(summary.get("total_P"))
+    total_F = _to_float(summary.get("total_F"))
+    total_C = _to_float(summary.get("total_C"))
     bf = pfc_map.get("朝食", {"P": 0, "F": 0, "C": 0})
     lu = pfc_map.get("昼食", {"P": 0, "F": 0, "C": 0})
     ds_pfc = {
@@ -636,17 +662,22 @@ def merge_results(summary: dict, detail_list: list) -> dict:
 
     gemini_text = build_gemini_text(summary, meal_map, pfc_map, ds_pfc)
 
+    # exercise は必ずリストに正規化
+    exercises = summary.get("exercise") or []
+    if not isinstance(exercises, list):
+        exercises = []
+
     return {
-        "date": summary.get("date", ""),
-        "weight": summary.get("weight", ""),
-        "total_kcal": summary.get("total_kcal"),
+        "date": summary.get("date") or "",
+        "weight": _to_float(summary.get("weight")) or "",  # None/0 → ""
+        "total_kcal": _to_float(summary.get("total_kcal")) or "",
         "total_P": total_P,
         "total_F": total_F,
         "total_C": total_C,
         "breakfast": {"P": bf["P"], "F": bf["F"], "C": bf["C"], "kcal": 0},
         "lunch": {"P": lu["P"], "F": lu["F"], "C": lu["C"], "kcal": 0},
         "dinner_snack": ds_pfc,
-        "exercise": summary.get("exercise", []),
+        "exercise": exercises,
         "_gemini_text": gemini_text,
     }
 
@@ -709,31 +740,38 @@ def write_to_spreadsheet(data: dict) -> str:
     def cell(col_letter: str, row: int) -> str:
         return f"{col_letter}{row}"
 
+    def v(val):
+        """None や数値を gspread-safe な値に変換する"""
+        if val is None:
+            return ""
+        return val
+
     updates = []
-    updates.append({"range": cell("Q", row_n), "values": [[date_str]]})
-    updates.append({"range": cell("S", row_n), "values": [[data.get("weight", "")]]})
+    updates.append({"range": cell("Q", row_n), "values": [[v(date_str)]]})
+    updates.append({"range": cell("S", row_n), "values": [[v(data.get("weight"))]]})
 
-    bf = data.get("breakfast", {})
-    updates.append({"range": cell("S", row_n + 3), "values": [[bf.get("P", "")]]})
-    updates.append({"range": cell("U", row_n + 3), "values": [[bf.get("F", "")]]})
-    updates.append({"range": cell("W", row_n + 3), "values": [[bf.get("C", "")]]})
+    bf = data.get("breakfast") or {}
+    updates.append({"range": cell("S", row_n + 3), "values": [[v(bf.get("P"))]]})
+    updates.append({"range": cell("U", row_n + 3), "values": [[v(bf.get("F"))]]})
+    updates.append({"range": cell("W", row_n + 3), "values": [[v(bf.get("C"))]]})
 
-    lu = data.get("lunch", {})
-    updates.append({"range": cell("S", row_n + 4), "values": [[lu.get("P", "")]]})
-    updates.append({"range": cell("U", row_n + 4), "values": [[lu.get("F", "")]]})
-    updates.append({"range": cell("W", row_n + 4), "values": [[lu.get("C", "")]]})
+    lu = data.get("lunch") or {}
+    updates.append({"range": cell("S", row_n + 4), "values": [[v(lu.get("P"))]]})
+    updates.append({"range": cell("U", row_n + 4), "values": [[v(lu.get("F"))]]})
+    updates.append({"range": cell("W", row_n + 4), "values": [[v(lu.get("C"))]]})
 
-    ds = data.get("dinner_snack", {})
-    updates.append({"range": cell("S", row_n + 5), "values": [[ds.get("P", "")]]})
-    updates.append({"range": cell("U", row_n + 5), "values": [[ds.get("F", "")]]})
-    updates.append({"range": cell("W", row_n + 5), "values": [[ds.get("C", "")]]})
+    ds = data.get("dinner_snack") or {}
+    updates.append({"range": cell("S", row_n + 5), "values": [[v(ds.get("P"))]]})
+    updates.append({"range": cell("U", row_n + 5), "values": [[v(ds.get("F"))]]})
+    updates.append({"range": cell("W", row_n + 5), "values": [[v(ds.get("C"))]]})
 
-    exercises = data.get("exercise", [])
-    for idx, ex in enumerate(exercises):
-        r = row_n + 2 + idx
-        updates.append({"range": cell("Z", r), "values": [[ex.get("menu", "")]]})
-        updates.append({"range": cell("AA", r), "values": [[ex.get("reps", "")]]})
-        updates.append({"range": cell("AB", r), "values": [[ex.get("sets", "")]]})
+    exercises = data.get("exercise") or []
+    if isinstance(exercises, list):
+        for idx, ex in enumerate(exercises):
+            r = row_n + 2 + idx
+            updates.append({"range": cell("Z", r), "values": [[v(ex.get("menu"))]]})
+            updates.append({"range": cell("AA", r), "values": [[v(ex.get("reps"))]]})
+            updates.append({"range": cell("AB", r), "values": [[v(ex.get("sets"))]]})
 
     worksheet.batch_update(updates)
     return tab_name
