@@ -1,115 +1,104 @@
 """
 カロミル食事スクショ → Googleスプレッドシート自動記録アプリ
 """
-import os
 import json
+import os
 import re
-import time
 import tempfile
-from datetime import datetime, date
-
-from google import genai
-from google.genai import types
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
-from flask import Flask, render_template, request, jsonify, Response
+import time
+from datetime import date, datetime
 from functools import wraps
 
-# ─────────────────────────────────────────────
-# 設定
-# ─────────────────────────────────────────────
+import gspread
+from flask import Flask, Response, jsonify, render_template, request
+from google import genai
+from google.genai import types
+from oauth2client.service_account import ServiceAccountCredentials
+
+# ──────────────────────────────────────────────────────────────
+# アプリ・環境変数
+# ──────────────────────────────────────────────────────────────
 app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024  # 200MB上限（動画対応）
+app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024  # 200 MB（動画対応）
 
-# ─────────────────────────────────────────────
-# Basic認証
-# ─────────────────────────────────────────────
-BASIC_AUTH_USERNAME = os.environ.get("BASIC_AUTH_USERNAME", "")
-BASIC_AUTH_PASSWORD = os.environ.get("BASIC_AUTH_PASSWORD", "")
+BASIC_AUTH_USERNAME         = os.environ.get("BASIC_AUTH_USERNAME", "")
+BASIC_AUTH_PASSWORD         = os.environ.get("BASIC_AUTH_PASSWORD", "")
+GEMINI_API_KEY              = os.environ.get("GEMINI_API_KEY", "")
+GOOGLE_SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+SPREADSHEET_URL             = "https://docs.google.com/spreadsheets/d/1z9PX6D_zbd1fhDDATzOOZNlLd3Ux1eMchoDBrMi7qCA/edit"
+START_DATE                  = date(2026, 3, 31)
+WEEKDAYS                    = ["月", "火", "水", "木", "金", "土", "日"]
+COUNT_UNITS                 = {"個", "本", "枚", "株", "杯", "缶", "食", "袋", "切", "片"}
 
-def check_auth(username: str, password: str) -> bool:
-    return username == BASIC_AUTH_USERNAME and password == BASIC_AUTH_PASSWORD
-
-def require_auth():
-    return Response(
-        "認証が必要です。ユーザー名とパスワードを入力してください。",
-        401,
-        {"WWW-Authenticate": 'Basic realm="Karomill"'},
-    )
-
+# ──────────────────────────────────────────────────────────────
+# Basic 認証
+# ──────────────────────────────────────────────────────────────
 def basic_auth_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         if not BASIC_AUTH_USERNAME or not BASIC_AUTH_PASSWORD:
             return f(*args, **kwargs)
         auth = request.authorization
-        if not auth or not check_auth(auth.username, auth.password):
-            return require_auth()
+        if not auth or auth.username != BASIC_AUTH_USERNAME or auth.password != BASIC_AUTH_PASSWORD:
+            return Response(
+                "認証が必要です。",
+                401,
+                {"WWW-Authenticate": 'Basic realm="Karomill"'},
+            )
         return f(*args, **kwargs)
     return decorated
 
-# ─────────────────────────────────────────────
-# Gemini設定
-# ─────────────────────────────────────────────
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-
-_FALLBACK_MODEL_CHAIN = [
-    os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"),
+# ──────────────────────────────────────────────────────────────
+# Gemini モデルチェーン（起動時に利用可能モデルを自動検出）
+# ──────────────────────────────────────────────────────────────
+_PREFERRED_MODELS: list = [
     "gemini-2.5-flash",
     "gemini-flash-latest",
     "gemini-2.5-flash-lite",
     "gemini-flash-lite-latest",
     "gemini-3-flash-preview",
     "gemini-3.1-flash-lite",
+    "gemini-3.1-flash-lite-preview",
     "gemini-2.0-flash-lite",
 ]
 
+
 def _build_model_chain(api_key: str) -> list:
-    """APIで利用可能なflashモデルを検索し、優先順でチェーンを返す。失敗時はフォールバック。"""
-    preferred_order = [
-        "gemini-2.5-flash", "gemini-flash-latest",
-        "gemini-2.5-flash-lite", "gemini-flash-lite-latest",
-        "gemini-3-flash-preview", "gemini-3.1-flash-lite",
-        "gemini-3.1-flash-lite-preview", "gemini-2.0-flash-lite",
-    ]
+    """APIで利用可能な flash モデルを検索し優先順で返す。失敗時はフォールバック。"""
+    env_model = os.environ.get("GEMINI_MODEL", "")
+    candidates = ([env_model] + _PREFERRED_MODELS) if env_model else list(_PREFERRED_MODELS)
+    # 重複除去（順序を保持）
+    seen: set = set()
+    candidates = [m for m in candidates if not (m in seen or seen.add(m))]
+
     if not api_key:
-        return _FALLBACK_MODEL_CHAIN
+        return candidates
     try:
         client = genai.Client(api_key=api_key)
-        listed = list(client.models.list())
-        available: set = set()
-        for m in listed:
-            name = getattr(m, "name", "") or ""
-            short = name.replace("models/", "")
-            methods = str(
+        available: set = {
+            m.name.replace("models/", "")
+            for m in client.models.list()
+            if "generateContent" in str(
                 getattr(m, "supported_generation_methods", None)
                 or getattr(m, "supported_actions", None)
                 or ""
             )
-            if "generateContent" in methods:
-                available.add(short)
-        # 優先順で並べた利用可能モデルのリスト
-        chain = [m for m in preferred_order if m in available]
-        # preferred にないが利用可能な flash 系をアルファベット順で追記
-        extras = sorted(n for n in available if "flash" in n and n not in chain)
-        chain.extend(extras)
+        }
+        chain = [m for m in candidates if m in available]
+        chain += sorted(n for n in available if "flash" in n and n not in chain)
         if chain:
             print(f"[Karomill] 利用可能モデル: {chain}", flush=True)
             return chain
     except Exception as e:
         print(f"[Karomill] モデル検索失敗、フォールバック使用: {e}", flush=True)
-    return _FALLBACK_MODEL_CHAIN
+    return candidates
 
-GEMINI_MODEL_CHAIN = _build_model_chain(GEMINI_API_KEY)
 
-GOOGLE_SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
-SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1z9PX6D_zbd1fhDDATzOOZNlLd3Ux1eMchoDBrMi7qCA/edit"
-START_DATE = date(2026, 3, 31)
+GEMINI_MODEL_CHAIN: list = _build_model_chain(GEMINI_API_KEY)
 
-# ─────────────────────────────────────────────
-# Gemini プロンプト（サマリー用・詳細用に分割）
-# ─────────────────────────────────────────────
-
+# ──────────────────────────────────────────────────────────────
+# プロンプト
+# ──────────────────────────────────────────────────────────────
 SUMMARY_PROMPT = """これはカロミルアプリの「帳尻合わせ」画面のスクリーンショットです。
 下記の手順に沿って情報を抽出し、最後にJSONのみを出力してください。説明文は不要です。
 
@@ -304,67 +293,69 @@ STEP7 total_C: 「炭水化物」行の「/」左の実績g ⚠「C:XX%」は絶
 }
 <<<JSON_END>>>"""
 
-
-# ─────────────────────────────────────────────
-# Gemini APIヘルパー
-# ─────────────────────────────────────────────
-
+# ──────────────────────────────────────────────────────────────
+# Gemini API — フォールバックチェーン
+# ──────────────────────────────────────────────────────────────
 def _is_skip_model_error(err_str: str) -> bool:
-    if "404" in err_str or "NOT_FOUND" in err_str or "no longer available" in err_str:
-        return True
-    if "PerDay" in err_str or "limit: 0" in err_str:
-        return True
-    return False
+    """404・廃止モデルなど、次のモデルにスキップすべきエラーか判定する"""
+    return any(k in err_str for k in (
+        "404", "NOT_FOUND", "no longer available", "PerDay", "limit: 0", "not found",
+    ))
 
 
 def _parse_retry_delay(err_str: str) -> int:
+    """レート制限エラーから推奨待機秒数を読み取る"""
     m = re.search(r"retry[_ ]?(?:in|delay)[^\d]*(\d+)", err_str, re.IGNORECASE)
     return int(m.group(1)) + 2 if m else 60
 
 
-def call_gemini(image_data: tuple, prompt: str) -> str:
-    """1枚の画像と指定プロンプトでGeminiを呼び出しテキストを返す。フォールバックチェーン付き。"""
-    image_bytes, mime_type = image_data
-    client = genai.Client(api_key=GEMINI_API_KEY)
-    parts = [types.Part.from_bytes(data=image_bytes, mime_type=mime_type), prompt]
+def _generate_with_chain(client: genai.Client, contents: list) -> str:
+    """モデルフォールバックチェーン付きで Gemini に問い合わせ、テキストを返す。
 
+    各モデルで最大2回試行する。クォータ枯渇時は次のモデルへ進む。
+    404/廃止エラーも同様にスキップする。全モデル失敗時は RuntimeError を送出。
+    """
     last_error = None
-    tried_models = []
+    tried: list = []
 
     for model in GEMINI_MODEL_CHAIN:
-        tried_models.append(model)
-        per_minute_retried = False
-
+        tried.append(model)
+        retried = False
         for _ in range(2):
             try:
-                response = client.models.generate_content(model=model, contents=parts)
-                return response.text
+                return client.models.generate_content(model=model, contents=contents).text
             except Exception as e:
                 err_str = str(e)
                 last_error = e
-                is_quota = "429" in err_str or "RESOURCE_EXHAUSTED" in err_str
-                # 404/廃止モデルは次のモデルへスキップ（クォータ判定の前に確認）
                 if _is_skip_model_error(err_str):
-                    break
+                    break  # このモデルはスキップ → 次へ
+                is_quota = "429" in err_str or "RESOURCE_EXHAUSTED" in err_str
                 if not is_quota:
-                    raise
-                if not per_minute_retried:
-                    per_minute_retried = True
+                    raise  # 予期しないエラーはそのまま送出
+                if not retried:
+                    retried = True
                     time.sleep(_parse_retry_delay(err_str))
-                    continue
                 else:
-                    break
+                    break  # 1回リトライ済み → 次のモデルへ
 
-    tried = ", ".join(tried_models)
     raise RuntimeError(
-        f"すべてのモデルで失敗（試行: {tried}）。しばらく時間をおいて再試行してください。\n詳細: {last_error}"
+        f"すべてのモデルで失敗（試行: {', '.join(tried)}）。"
+        f"しばらく時間をおいて再試行してください。\n詳細: {last_error}"
     )
 
 
+def call_gemini(image_data: tuple, prompt: str) -> str:
+    """画像1枚 + プロンプトで Gemini を呼び出しテキストを返す"""
+    image_bytes, mime_type = image_data
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    contents = [types.Part.from_bytes(data=image_bytes, mime_type=mime_type), prompt]
+    return _generate_with_chain(client, contents)
+
+# ──────────────────────────────────────────────────────────────
+# JSON 抽出・パース
+# ──────────────────────────────────────────────────────────────
 def _sanitize_json_string(s: str) -> str:
-    """JSON文字列値内の未エスケープ制御文字（改行・タブ等）をエスケープする。
-    AIが string 値の中に生の改行を出力するケースへの対処。
-    """
+    """JSON文字列値内の未エスケープ制御文字（改行・タブ等）をエスケープする"""
     result = []
     in_string = False
     escape_next = False
@@ -373,7 +364,7 @@ def _sanitize_json_string(s: str) -> str:
             result.append(ch)
             escape_next = False
             continue
-        if ch == '\\':
+        if ch == "\\":
             result.append(ch)
             escape_next = True
             continue
@@ -382,66 +373,58 @@ def _sanitize_json_string(s: str) -> str:
             result.append(ch)
             continue
         if in_string:
-            if ch == '\n':
-                result.append('\\n')
+            if ch == "\n":
+                result.append("\\n")
                 continue
-            if ch == '\r':
-                result.append('\\r')
+            if ch == "\r":
+                result.append("\\r")
                 continue
-            if ch == '\t':
-                result.append('\\t')
+            if ch == "\t":
+                result.append("\\t")
                 continue
         result.append(ch)
-    return ''.join(result)
+    return "".join(result)
 
 
 def _remove_trailing_commas(s: str) -> str:
-    """JSON内の末尾カンマ（Geminiが頻出させる）を除去する。例: [1,2,] → [1,2]"""
-    return re.sub(r',(\s*[}\]])', r'\1', s)
+    """JSON末尾カンマを除去する（例: [1, 2,] → [1, 2]）"""
+    return re.sub(r",(\s*[}\]])", r"\1", s)
 
 
 def _parse_json(raw: str) -> dict:
-    """json.loads を試み、失敗したら段階的に修復して再試行する。"""
-    # ステップ1: そのまま試す
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        pass
-    # ステップ2: 末尾カンマ除去
-    cleaned = _remove_trailing_commas(raw)
-    try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError:
-        pass
-    # ステップ3: 文字列内制御文字エスケープ + 末尾カンマ除去
-    return json.loads(_remove_trailing_commas(_sanitize_json_string(raw)))
-
-
-def _to_float(val, default: float = 0.0) -> float:
-    """Gemini出力を安全にfloatへ変換する。None・単位付き文字列・"null"文字列に対応。"""
-    if val is None:
-        return default
-    try:
-        # 数字・小数点・マイナス以外を除去してからfloat変換
-        cleaned = re.sub(r'[^\d.\-]', '', str(val))
-        return float(cleaned) if cleaned else default
-    except (ValueError, TypeError):
-        return default
+    """json.loads を段階的に修復しながら試みる"""
+    last_err = None
+    for attempt in (
+        raw,
+        _remove_trailing_commas(raw),
+        _remove_trailing_commas(_sanitize_json_string(raw)),
+    ):
+        try:
+            return json.loads(attempt)
+        except json.JSONDecodeError as e:
+            last_err = e
+    raise last_err
 
 
 def extract_json(text: str) -> dict:
-    """<<<JSON_START>>>...<<<JSON_END>>> からJSONを抽出。マーカーがない場合は生JSONをフォールバック解析。"""
+    """Geminiレスポンスから JSON を抽出してパースする。
+
+    抽出パターン（優先順）:
+    ① <<<JSON_START>>>...<<<JSON_END>>> マーカー
+    ② ```json ... ``` コードブロック
+    ③ テキスト全体から { ... } を抽出（フォールバック）
+    """
     # ① マーカーあり（通常ケース）
     m = re.search(r"<<<JSON_START>>>(.*?)<<<JSON_END>>>", text, re.DOTALL)
     if m:
         return _parse_json(m.group(1).strip())
 
-    # ② マーカーなし：コードブロック内のJSONを試みる
+    # ② コードブロック
     m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
     if m:
         return _parse_json(m.group(1).strip())
 
-    # ③ テキスト全体から最外部の { ... } を抽出して解析
+    # ③ 生JSON フォールバック
     m = re.search(r"(\{.*\})", text, re.DOTALL)
     if m:
         try:
@@ -451,99 +434,61 @@ def extract_json(text: str) -> dict:
 
     raise ValueError(f"JSONを抽出できませんでした。Gemini応答:\n{text[:500]}")
 
-
+# ──────────────────────────────────────────────────────────────
+# 画像・動画解析
+# ──────────────────────────────────────────────────────────────
 def analyze_summary(image_data: tuple) -> dict:
-    """サマリー画像（帳尻合わせ）を解析"""
+    """帳尻合わせ画面（サマリー）を解析する"""
     return extract_json(call_gemini(image_data, SUMMARY_PROMPT))
 
 
 def analyze_detail(image_data: tuple) -> dict:
-    """食事詳細画像1枚を解析"""
+    """食事詳細画像1枚を解析する"""
     return extract_json(call_gemini(image_data, DETAIL_PROMPT))
 
 
-def analyze_video(video_bytes: bytes, mime_type: str) -> dict:
-    """MP4動画をGemini Files APIで解析してmerge_results済みdictを返す"""
+def analyze_video(video_bytes: bytes, mime_type: str, override_date: str = "") -> dict:
+    """MP4動画を Gemini Files API で解析して merge_results 済み dict を返す。
+
+    override_date が指定された場合、AIが読んだ日付より優先して使用する。
+    """
     client = genai.Client(api_key=GEMINI_API_KEY)
 
-    # 一時ファイルに書き出してアップロード
-    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
-        f.write(video_bytes)
-        tmp_path = f.name
+    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+        tmp.write(video_bytes)
+        tmp_path = tmp.name
 
     video_file = None
     try:
         video_file = client.files.upload(file=tmp_path)
 
-        # 処理完了を待機（最大90秒）
-        waited = 0
-        while waited < 90:
-            state_str = str(video_file.state)
-            if "PROCESSING" not in state_str:
+        # Files API 処理完了を待機（最大 90 秒 = 30回 × 3秒）
+        for _ in range(30):
+            if "PROCESSING" not in str(video_file.state):
                 break
             time.sleep(3)
-            waited += 3
             video_file = client.files.get(name=video_file.name)
 
         if "FAILED" in str(video_file.state):
             raise RuntimeError("動画のGemini処理に失敗しました。別の動画で試してください。")
 
-        # call_gemini と同じフォールバックチェーンで生成
-        last_error = None
-        response_text = None
-        tried_models = []
-        for model in GEMINI_MODEL_CHAIN:
-            tried_models.append(model)
-            per_minute_retried = False
-            for _ in range(2):
-                try:
-                    resp = client.models.generate_content(
-                        model=model,
-                        contents=[video_file, VIDEO_PROMPT],
-                    )
-                    response_text = resp.text
-                    break
-                except Exception as e:
-                    err_str = str(e)
-                    last_error = e
-                    is_quota = "429" in err_str or "RESOURCE_EXHAUSTED" in err_str
-                    # 404/廃止モデルは次のモデルへスキップ
-                    if _is_skip_model_error(err_str):
-                        break
-                    if not is_quota:
-                        raise
-                    if not per_minute_retried:
-                        per_minute_retried = True
-                        time.sleep(_parse_retry_delay(err_str))
-                        continue
-                    else:
-                        break
-            if response_text is not None:
-                break
-
-        if response_text is None:
-            tried = ", ".join(tried_models)
-            raise RuntimeError(
-                f"すべてのモデルでクォータが枯渇（試行: {tried}）。しばらく時間をおいて再試行してください。\n詳細: {last_error}"
-            )
-
+        response_text = _generate_with_chain(client, [video_file, VIDEO_PROMPT])
         raw = extract_json(response_text)
 
-        # サマリー部分とメール詳細部分に分割してmerge_resultsへ渡す
         summary = {
-            "date": raw.get("date", ""),
-            "weight": raw.get("weight"),
-            "sleep": raw.get("sleep", ""),
-            "total_kcal": raw.get("total_kcal"),
-            "total_P": raw.get("total_P"),
-            "total_F": raw.get("total_F"),
-            "total_C": raw.get("total_C"),
+            "date":            raw.get("date", ""),
+            "weight":          raw.get("weight"),
+            "sleep":           raw.get("sleep", ""),
+            "total_kcal":      raw.get("total_kcal"),
+            "total_P":         raw.get("total_P"),
+            "total_F":         raw.get("total_F"),
+            "total_C":         raw.get("total_C"),
             "self_evaluation": raw.get("self_evaluation", ""),
-            "exercise_notes": raw.get("exercise_notes", ""),
-            "exercise": raw.get("exercise", []),
+            "exercise_notes":  raw.get("exercise_notes", ""),
+            "exercise":        raw.get("exercise", []),
         }
         detail_list = [{"meals": raw.get("meals", [])}]
-        return merge_results(summary, detail_list)
+        return merge_results(summary, detail_list, override_date=override_date)
 
     finally:
         try:
@@ -556,61 +501,88 @@ def analyze_video(video_bytes: bytes, mime_type: str) -> dict:
             except Exception:
                 pass
 
+# ──────────────────────────────────────────────────────────────
+# 数値変換・表示ユーティリティ
+# ──────────────────────────────────────────────────────────────
+def _to_float(val, default: float = 0.0) -> float:
+    """Gemini出力を安全に float へ変換する。None・単位付き文字列に対応。"""
+    if val is None:
+        return default
+    try:
+        cleaned = re.sub(r"[^\d.\-]", "", str(val))
+        return float(cleaned) if cleaned else default
+    except (ValueError, TypeError):
+        return default
 
-# ─────────────────────────────────────────────
-# PFC計算・表示テキスト生成
-# ─────────────────────────────────────────────
 
-# 個数系の単位（%を摂取量に適用しない）
-COUNT_UNITS = {"個", "本", "枚", "株", "杯", "缶", "食", "袋", "切", "片"}
-WEEKDAYS = ["月", "火", "水", "木", "金", "土", "日"]
+def _gs_val(val):
+    """gspread に渡す値を None-safe にする（None → ""）"""
+    return "" if val is None else val
 
 
 def calc_actual_pfc(item: dict) -> tuple:
-    """食品1つの実際のP/F/C（%適用後）を返す"""
-    pct = float(item.get("percentage") or 100) / 100
-    P = round(float(item.get("P") or 0) * pct, 1)
-    F = round(float(item.get("F") or 0) * pct, 1)
-    C = round(float(item.get("C") or 0) * pct, 1)
+    """食品1つの実際の P/F/C（%適用後）を返す"""
+    pct = _to_float(item.get("percentage"), 100) / 100
+    P = round(_to_float(item.get("P")) * pct, 1)
+    F = round(_to_float(item.get("F")) * pct, 1)
+    C = round(_to_float(item.get("C")) * pct, 1)
     return P, F, C
 
 
 def format_amount(base_amount, base_unit: str, percentage: float) -> str:
-    """表示用の分量文字列を生成"""
+    """表示用の分量文字列を生成する"""
     if base_unit == "pct_only" or base_amount is None:
-        # 基準量なし → グラム計算不可のため表示なし
         return ""
     if base_unit in COUNT_UNITS:
-        amt = int(base_amount) if float(base_amount) == int(float(base_amount)) else base_amount
-        return f"{amt}{base_unit}"
+        disp = int(base_amount) if float(base_amount) == int(float(base_amount)) else base_amount
     else:
-        # 基準量 × % = 実際の摂取量
         actual = float(base_amount) * percentage / 100
-        amt = int(actual) if actual == int(actual) else round(actual, 1)
-        return f"{amt}{base_unit}"
+        disp = int(actual) if actual == int(actual) else round(actual, 1)
+    return f"{disp}{base_unit}"
 
 
 def sum_pfc(meals: list) -> dict:
-    """mealリストからPFCを合計"""
-    P, F, C = 0.0, 0.0, 0.0
+    """食事リストから PFC を合計する"""
+    P = F = C = 0.0
     for meal in meals:
         for item in meal.get("items", []):
             p, f, c = calc_actual_pfc(item)
-            P += p; F += f; C += c
+            P += p
+            F += f
+            C += c
     return {"P": round(P, 1), "F": round(F, 1), "C": round(C, 1)}
 
+# ──────────────────────────────────────────────────────────────
+# 日付・週番号
+# ──────────────────────────────────────────────────────────────
+def parse_record_date(date_str: str) -> date:
+    """'M/D' 形式の文字列を date オブジェクトに変換する"""
+    parts = date_str.strip().split("/")
+    month, day = int(parts[0]), int(parts[1])
+    year = datetime.now().year
+    candidate = date(year, month, day)
+    # 半年以上ズレていれば前年と判断
+    if abs((candidate - date.today()).days) > 180:
+        candidate = date(year - 1, month, day)
+    return candidate
 
+
+def get_week_number(record_date: date) -> int:
+    return (record_date - START_DATE).days // 7 + 1
+
+# ──────────────────────────────────────────────────────────────
+# 表示テキスト生成・データ統合
+# ──────────────────────────────────────────────────────────────
 def build_gemini_text(summary: dict, meal_map: dict, pfc_map: dict, ds_pfc: dict) -> str:
-    """ユーザー向け表示テキストを構築"""
-    lines = []
-
-    # PFC合計
+    """ユーザー向け表示テキストを構築する"""
     bf = pfc_map.get("朝食", {"P": 0, "F": 0, "C": 0})
     lu = pfc_map.get("昼食", {"P": 0, "F": 0, "C": 0})
-    lines.append("【各食事のPFC合計】")
-    lines.append(f"朝食 [P:{bf['P']}g F:{bf['F']}g C:{bf['C']}g]")
-    lines.append(f"昼食 [P:{lu['P']}g F:{lu['F']}g C:{lu['C']}g]")
-    lines.append(f"夜・間食 [P:{ds_pfc['P']}g F:{ds_pfc['F']}g C:{ds_pfc['C']}g]")
+    lines = [
+        "【各食事のPFC合計】",
+        f"朝食 [P:{bf['P']}g F:{bf['F']}g C:{bf['C']}g]",
+        f"昼食 [P:{lu['P']}g F:{lu['F']}g C:{lu['C']}g]",
+        f"夜・間食 [P:{ds_pfc['P']}g F:{ds_pfc['F']}g C:{ds_pfc['C']}g]",
+    ]
 
     # 日付・睡眠・体重
     date_str = summary.get("date", "不明")
@@ -619,63 +591,48 @@ def build_gemini_text(summary: dict, meal_map: dict, pfc_map: dict, ds_pfc: dict
         lines.append(f"{d.month}月{d.day}日({WEEKDAYS[d.weekday()]})")
     except Exception:
         lines.append(date_str)
-
     lines.append(f"睡眠 {summary.get('sleep') or '不明'}")
-    w = summary.get("weight", "不明")
-    lines.append(f"体重 {w}kg (前日比 kg)")
+    lines.append(f"体重 {summary.get('weight', '不明')}kg (前日比 kg)")
 
-    # 合計摂取栄養素
-    lines.append("【合計摂取栄養素】")
-    lines.append(f"カロリー： {summary.get('total_kcal', '不明')}kcal")
-    lines.append(f"P（たんぱく質）： {summary.get('total_P', '不明')}g")
-    lines.append(f"F（脂質）： {summary.get('total_F', '不明')}g")
-    lines.append(f"C（炭水化物）： {summary.get('total_C', '不明')}g")
+    # 合計栄養素
+    lines += [
+        "【合計摂取栄養素】",
+        f"カロリー： {summary.get('total_kcal', '不明')}kcal",
+        f"P（たんぱく質）： {summary.get('total_P', '不明')}g",
+        f"F（脂質）： {summary.get('total_F', '不明')}g",
+        f"C（炭水化物）： {summary.get('total_C', '不明')}g",
+    ]
 
     # 食事詳細（朝食→昼食→間食→夕食の順）
     counter = 1
     for meal_type in ["朝食", "昼食", "間食", "夕食"]:
         for meal in meal_map.get(meal_type, []):
             t = meal.get("time", "") or ""
-            time_part = f"（{t}）" if t else ""
-            lines.append(f"{counter}回目 {meal_type}{time_part}")
+            lines.append(f"{counter}回目 {meal_type}{'（' + t + '）' if t else ''}")
             for item in meal.get("items", []):
                 amt = format_amount(
                     item.get("base_amount"),
                     item.get("base_unit", ""),
-                    float(item.get("percentage") or 100),
+                    _to_float(item.get("percentage"), 100),
                 )
                 lines.append(f"{item['name']} {amt}".strip())
             counter += 1
 
-    # 自己評価・運動
-    lines.append("【自己評価】")
-    lines.append(summary.get("self_evaluation") or "不明")
-    lines.append("【運動】")
-    lines.append(summary.get("exercise_notes") or "不明")
-
+    lines += [
+        "【自己評価】",
+        summary.get("self_evaluation") or "不明",
+        "【運動】",
+        summary.get("exercise_notes") or "不明",
+    ]
     return "\n".join(lines)
 
 
-def _fix_gemini_text_date(data: dict) -> None:
-    """data["date"] に合わせて _gemini_text 内の日付表示を修正する"""
-    date_str = data.get("date", "")
-    if not date_str or "_gemini_text" not in data:
-        return
-    try:
-        d = parse_record_date(date_str)
-        new_date_line = f"{d.month}月{d.day}日({WEEKDAYS[d.weekday()]})"
-    except Exception:
-        new_date_line = date_str
-    # 「M月D日(曜)」パターンを正しい日付で置換
-    data["_gemini_text"] = re.sub(
-        r'\d+月\d+日\([月火水木金土日]\)',
-        new_date_line,
-        data["_gemini_text"],
-    )
+def merge_results(summary: dict, detail_list: list, override_date: str = "") -> dict:
+    """サマリーと詳細を統合してスプレッドシート書き込み用 dict を返す。
 
-
-def merge_results(summary: dict, detail_list: list) -> dict:
-    """サマリーと詳細を統合してスプレッドシート書き込み用dictを返す"""
+    override_date が指定された場合、AIが読んだ日付より優先して使用する。
+    表示テキスト（_gemini_text）にも正しい日付が反映される。
+    """
     # 食事種別ごとにまとめる
     meal_map: dict = {}
     for detail in detail_list:
@@ -683,7 +640,6 @@ def merge_results(summary: dict, detail_list: list) -> dict:
             mt = meal.get("type", "不明")
             meal_map.setdefault(mt, []).append(meal)
 
-    # PFCをPythonで計算（食事種別ごと）
     pfc_map = {mt: sum_pfc(meals) for mt, meals in meal_map.items()}
 
     # 夜・間食を逆算（合計 - 朝食 - 昼食）
@@ -698,7 +654,12 @@ def merge_results(summary: dict, detail_list: list) -> dict:
         "C": round(total_C - bf["C"] - lu["C"], 1),
     }
 
-    gemini_text = build_gemini_text(summary, meal_map, pfc_map, ds_pfc)
+    # override_date をテキスト生成前に適用することで事後パッチ不要
+    effective_summary = dict(summary)
+    if override_date:
+        effective_summary["date"] = override_date
+
+    gemini_text = build_gemini_text(effective_summary, meal_map, pfc_map, ds_pfc)
 
     # exercise は必ずリストに正規化
     exercises = summary.get("exercise") or []
@@ -706,42 +667,24 @@ def merge_results(summary: dict, detail_list: list) -> dict:
         exercises = []
 
     return {
-        "date": summary.get("date") or "",
-        "weight": _to_float(summary.get("weight")) or "",  # None/0 → ""
-        "total_kcal": _to_float(summary.get("total_kcal")) or "",
-        "total_P": total_P,
-        "total_F": total_F,
-        "total_C": total_C,
-        "breakfast": {"P": bf["P"], "F": bf["F"], "C": bf["C"], "kcal": 0},
-        "lunch": {"P": lu["P"], "F": lu["F"], "C": lu["C"], "kcal": 0},
+        "date":         override_date or summary.get("date") or "",
+        "weight":       _to_float(summary.get("weight")) or "",
+        "total_kcal":   _to_float(summary.get("total_kcal")) or "",
+        "total_P":      total_P,
+        "total_F":      total_F,
+        "total_C":      total_C,
+        "breakfast":    {"P": bf["P"], "F": bf["F"], "C": bf["C"], "kcal": 0},
+        "lunch":        {"P": lu["P"], "F": lu["F"], "C": lu["C"], "kcal": 0},
         "dinner_snack": ds_pfc,
-        "exercise": exercises,
+        "exercise":     exercises,
         "_gemini_text": gemini_text,
     }
 
-
-# ─────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────
 # スプレッドシート書き込み
-# ─────────────────────────────────────────────
-
-def get_week_number(record_date: date) -> int:
-    delta = (record_date - START_DATE).days
-    return delta // 7 + 1
-
-
-def parse_record_date(date_str: str) -> date:
-    parts = date_str.strip().split("/")
-    month = int(parts[0])
-    day = int(parts[1])
-    year = datetime.now().year
-    today = date.today()
-    candidate = date(year, month, day)
-    if abs((candidate - today).days) > 180:
-        candidate = date(year - 1, month, day)
-    return candidate
-
-
+# ──────────────────────────────────────────────────────────────
 def write_to_spreadsheet(data: dict) -> str:
+    """data をスプレッドシートに書き込み、タブ名を返す"""
     if not GOOGLE_SERVICE_ACCOUNT_JSON:
         raise ValueError("GOOGLE_SERVICE_ACCOUNT_JSON が設定されていません。")
 
@@ -750,13 +693,11 @@ def write_to_spreadsheet(data: dict) -> str:
         "https://spreadsheets.google.com/feeds",
         "https://www.googleapis.com/auth/drive",
     ]
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(sa_info, scope)
-    gc = gspread.authorize(creds)
+    gc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(sa_info, scope))
     spreadsheet = gc.open_by_url(SPREADSHEET_URL)
 
     record_date = parse_record_date(data["date"])
-    week_num = get_week_number(record_date)
-    tab_name = f"{week_num}週目"
+    tab_name = f"{get_week_number(record_date)}週目"
 
     try:
         worksheet = spreadsheet.worksheet(tab_name)
@@ -764,68 +705,81 @@ def write_to_spreadsheet(data: dict) -> str:
         raise ValueError(f"タブ「{tab_name}」が見つかりません。スプレッドシートに追加してください。")
 
     date_str = data["date"]
-    q_col_values = worksheet.col_values(17)
-
-    row_n = None
-    for i, cell_val in enumerate(q_col_values, start=1):
-        if cell_val.strip() == date_str:
-            row_n = i
-            break
-
+    q_col = worksheet.col_values(17)
+    row_n = next(
+        (i for i, v in enumerate(q_col, start=1) if v.strip() == date_str),
+        None,
+    )
     if row_n is None:
         raise ValueError(f"タブ「{tab_name}」のQ列に「{date_str}」が見つかりませんでした。")
 
-    def cell(col_letter: str, row: int) -> str:
-        return f"{col_letter}{row}"
+    def col(letter: str, row: int) -> str:
+        return f"{letter}{row}"
 
-    def v(val):
-        """None や数値を gspread-safe な値に変換する"""
-        if val is None:
-            return ""
-        return val
-
-    updates = []
-    updates.append({"range": cell("Q", row_n), "values": [[v(date_str)]]})
-    updates.append({"range": cell("S", row_n), "values": [[v(data.get("weight"))]]})
-
-    bf = data.get("breakfast") or {}
-    updates.append({"range": cell("S", row_n + 3), "values": [[v(bf.get("P"))]]})
-    updates.append({"range": cell("U", row_n + 3), "values": [[v(bf.get("F"))]]})
-    updates.append({"range": cell("W", row_n + 3), "values": [[v(bf.get("C"))]]})
-
-    lu = data.get("lunch") or {}
-    updates.append({"range": cell("S", row_n + 4), "values": [[v(lu.get("P"))]]})
-    updates.append({"range": cell("U", row_n + 4), "values": [[v(lu.get("F"))]]})
-    updates.append({"range": cell("W", row_n + 4), "values": [[v(lu.get("C"))]]})
-
+    bf = data.get("breakfast")    or {}
+    lu = data.get("lunch")        or {}
     ds = data.get("dinner_snack") or {}
-    updates.append({"range": cell("S", row_n + 5), "values": [[v(ds.get("P"))]]})
-    updates.append({"range": cell("U", row_n + 5), "values": [[v(ds.get("F"))]]})
-    updates.append({"range": cell("W", row_n + 5), "values": [[v(ds.get("C"))]]})
+
+    updates = [
+        {"range": col("Q", row_n),     "values": [[_gs_val(date_str)]]},
+        {"range": col("S", row_n),     "values": [[_gs_val(data.get("weight"))]]},
+        {"range": col("S", row_n + 3), "values": [[_gs_val(bf.get("P"))]]},
+        {"range": col("U", row_n + 3), "values": [[_gs_val(bf.get("F"))]]},
+        {"range": col("W", row_n + 3), "values": [[_gs_val(bf.get("C"))]]},
+        {"range": col("S", row_n + 4), "values": [[_gs_val(lu.get("P"))]]},
+        {"range": col("U", row_n + 4), "values": [[_gs_val(lu.get("F"))]]},
+        {"range": col("W", row_n + 4), "values": [[_gs_val(lu.get("C"))]]},
+        {"range": col("S", row_n + 5), "values": [[_gs_val(ds.get("P"))]]},
+        {"range": col("U", row_n + 5), "values": [[_gs_val(ds.get("F"))]]},
+        {"range": col("W", row_n + 5), "values": [[_gs_val(ds.get("C"))]]},
+    ]
 
     exercises = data.get("exercise") or []
     if isinstance(exercises, list):
         for idx, ex in enumerate(exercises):
             r = row_n + 2 + idx
-            updates.append({"range": cell("Z", r), "values": [[v(ex.get("menu"))]]})
-            updates.append({"range": cell("AA", r), "values": [[v(ex.get("reps"))]]})
-            updates.append({"range": cell("AB", r), "values": [[v(ex.get("sets"))]]})
+            updates += [
+                {"range": col("Z",  r), "values": [[_gs_val(ex.get("menu"))]]},
+                {"range": col("AA", r), "values": [[_gs_val(ex.get("reps"))]]},
+                {"range": col("AB", r), "values": [[_gs_val(ex.get("sets"))]]},
+            ]
 
     worksheet.batch_update(updates)
     return tab_name
 
+# ──────────────────────────────────────────────────────────────
+# レスポンス生成ヘルパー
+# ──────────────────────────────────────────────────────────────
+def _success_response(data: dict, tab_name: str):
+    return jsonify({
+        "success":     True,
+        "tab":         tab_name,
+        "date":        data.get("date"),
+        "weight":      data.get("weight"),
+        "gemini_text": data.get("_gemini_text", ""),
+        "data":        {k: v for k, v in data.items() if k != "_gemini_text"},
+    })
 
-# ─────────────────────────────────────────────
+
+def _error_response(msg: str, data: dict = None, status: int = 500):
+    payload = {"success": False, "error": msg}
+    if data:
+        payload["gemini_text"] = data.get("_gemini_text", "")
+        payload["data"] = {k: v for k, v in data.items() if k != "_gemini_text"}
+    return jsonify(payload), status
+
+# ──────────────────────────────────────────────────────────────
 # ルート
-# ─────────────────────────────────────────────
-
+# ──────────────────────────────────────────────────────────────
 @app.errorhandler(Exception)
 def handle_exception(e):
     return jsonify({"success": False, "error": f"サーバーエラー: {str(e)}"}), 500
 
+
 @app.errorhandler(404)
 def handle_404(e):
     return jsonify({"success": False, "error": "ページが見つかりません。"}), 404
+
 
 @app.route("/")
 @basic_auth_required
@@ -836,126 +790,86 @@ def index():
 @app.route("/upload", methods=["POST"])
 @basic_auth_required
 def upload():
-    files = request.files.getlist("images") or request.files.getlist("image")
-    files = [f for f in files if f and f.filename != ""]
-    user_date = request.form.get("date", "").strip()  # "M/D" 形式
+    files = [f for f in (request.files.getlist("images") or request.files.getlist("image"))
+             if f and f.filename]
+    user_date = request.form.get("date", "").strip()
 
     if not files:
-        return jsonify({"success": False, "error": "画像ファイルが選択されていません。"}), 400
+        return _error_response("画像ファイルが選択されていません。", status=400)
     if not GEMINI_API_KEY:
-        return jsonify({"success": False, "error": "GEMINI_API_KEY が設定されていません。"}), 500
+        return _error_response("GEMINI_API_KEY が設定されていません。")
 
     image_list = [(f.read(), f.content_type or "image/jpeg") for f in files]
 
     try:
-        if len(image_list) == 1:
-            # 1枚のみ：サマリー画像として処理（詳細なし）
-            summary = analyze_summary(image_list[0])
-            data = merge_results(summary, [])
-        else:
-            # 1枚目：サマリー、2枚目以降：食事詳細を1枚ずつ個別解析
-            summary = analyze_summary(image_list[0])
-            detail_list = [analyze_detail(img) for img in image_list[1:]]
-            data = merge_results(summary, detail_list)
+        summary  = analyze_summary(image_list[0])
+        details  = [analyze_detail(img) for img in image_list[1:]]
+        data     = merge_results(summary, details, override_date=user_date)
     except Exception as e:
-        return jsonify({"success": False, "error": f"AI解析エラー: {str(e)}"}), 500
-
-    # ユーザー選択日付で上書き（AIの読み取り結果より優先）
-    if user_date:
-        data["date"] = user_date
-        _fix_gemini_text_date(data)  # 解析テキスト内の日付も修正
+        return _error_response(f"AI解析エラー: {e}")
 
     try:
         tab_name = write_to_spreadsheet(data)
     except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": f"スプレッドシート書き込みエラー: {str(e)}",
-            "gemini_text": data.get("_gemini_text", ""),
-            "data": {k: v for k, v in data.items() if k != "_gemini_text"},
-        }), 500
+        return _error_response(f"スプレッドシート書き込みエラー: {e}", data=data)
 
-    return jsonify({
-        "success": True,
-        "tab": tab_name,
-        "date": data.get("date"),
-        "weight": data.get("weight"),
-        "gemini_text": data.get("_gemini_text", ""),
-        "data": {k: v for k, v in data.items() if k != "_gemini_text"},
-    })
+    return _success_response(data, tab_name)
 
 
 @app.route("/upload-video", methods=["POST"])
 @basic_auth_required
 def upload_video():
     f = request.files.get("video")
-    user_date = request.form.get("date", "").strip()  # "M/D" 形式
-    if not f or f.filename == "":
-        return jsonify({"success": False, "error": "動画ファイルが選択されていません。"}), 400
+    user_date = request.form.get("date", "").strip()
+
+    if not f or not f.filename:
+        return _error_response("動画ファイルが選択されていません。", status=400)
     if not GEMINI_API_KEY:
-        return jsonify({"success": False, "error": "GEMINI_API_KEY が設定されていません。"}), 500
+        return _error_response("GEMINI_API_KEY が設定されていません。")
 
     try:
-        data = analyze_video(f.read(), f.content_type or "video/mp4")
+        data = analyze_video(f.read(), f.content_type or "video/mp4", override_date=user_date)
     except Exception as e:
-        return jsonify({"success": False, "error": f"AI解析エラー: {str(e)}"}), 500
-
-    # ユーザー選択日付で上書き（AIの読み取り結果より優先）
-    if user_date:
-        data["date"] = user_date
-        _fix_gemini_text_date(data)  # 解析テキスト内の日付も修正
+        return _error_response(f"AI解析エラー: {e}")
 
     try:
         tab_name = write_to_spreadsheet(data)
     except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": f"スプレッドシート書き込みエラー: {str(e)}",
-            "gemini_text": data.get("_gemini_text", ""),
-            "data": {k: v for k, v in data.items() if k != "_gemini_text"},
-        }), 500
+        return _error_response(f"スプレッドシート書き込みエラー: {e}", data=data)
 
-    return jsonify({
-        "success": True,
-        "tab": tab_name,
-        "date": data.get("date"),
-        "weight": data.get("weight"),
-        "gemini_text": data.get("_gemini_text", ""),
-        "data": {k: v for k, v in data.items() if k != "_gemini_text"},
-    })
+    return _success_response(data, tab_name)
 
 
 @app.route("/test-connection")
 @basic_auth_required
 def test_connection():
-    result = {}
     if not GOOGLE_SERVICE_ACCOUNT_JSON:
         return jsonify({"success": False, "error": "GOOGLE_SERVICE_ACCOUNT_JSON が未設定です。"}), 500
     try:
         sa_info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
-        result["service_account_email"] = sa_info.get("client_email", "取得できませんでした")
     except Exception as e:
         return jsonify({"success": False, "error": f"JSON解析エラー: {e}"}), 500
 
-    result["gemini_api_key_set"] = bool(GEMINI_API_KEY)
-
+    result = {
+        "service_account_email": sa_info.get("client_email", "取得できませんでした"),
+        "gemini_api_key_set":    bool(GEMINI_API_KEY),
+    }
     try:
         scope = [
             "https://spreadsheets.google.com/feeds",
             "https://www.googleapis.com/auth/drive",
         ]
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(sa_info, scope)
-        gc = gspread.authorize(creds)
+        gc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(sa_info, scope))
         spreadsheet = gc.open_by_url(SPREADSHEET_URL)
-        result["success"] = True
+        result["success"]           = True
         result["spreadsheet_title"] = spreadsheet.title
-        result["tabs"] = [ws.title for ws in spreadsheet.worksheets()]
+        result["tabs"]              = [ws.title for ws in spreadsheet.worksheets()]
     except gspread.exceptions.APIError as e:
-        result["success"] = False
+        result["success"]           = False
         result["spreadsheet_error"] = f"APIError: {e.response.status_code} - {e.response.json()}"
     except Exception as e:
         import traceback
-        result["success"] = False
+        result["success"]           = False
         result["spreadsheet_error"] = traceback.format_exc()
 
     return jsonify(result)
