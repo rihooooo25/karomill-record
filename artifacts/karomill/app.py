@@ -1,6 +1,7 @@
 """
 カロミル食事スクショ → Googleスプレッドシート自動記録アプリ
 """
+import concurrent.futures
 import json
 import os
 import re
@@ -96,21 +97,15 @@ def _build_model_chain(api_key: str) -> list:
 
 GEMINI_MODEL_CHAIN: list = _build_model_chain(GEMINI_API_KEY)
 
+# Gemini API 呼び出し1回あたりのタイムアウト（秒）
+# Gunicorn の --timeout より短くすることで、タイムアウト時に
+# ワーカーが強制終了される前にクリーンなエラーレスポンスを返せる。
+_GEMINI_CALL_TIMEOUT = 180  # 3分
+
 
 def _make_client() -> genai.Client:
-    """4分の HTTP タイムアウト付きの Gemini クライアントを返す。
-    
-    タイムアウトを設定しないと、generate_content がネットワーク障害時に
-    無限にハングし Gunicorn ワーカーが強制終了されて 500 になる。
-    """
-    try:
-        return genai.Client(
-            api_key=GEMINI_API_KEY,
-            http_options=types.HttpOptions(timeout=240_000),  # 4 分（ミリ秒）
-        )
-    except Exception:
-        # 古いバージョンの SDK が HttpOptions.timeout を未サポートの場合フォールバック
-        return genai.Client(api_key=GEMINI_API_KEY)
+    """Gemini クライアントを返す"""
+    return genai.Client(api_key=GEMINI_API_KEY)
 
 # ──────────────────────────────────────────────────────────────
 # プロンプト
@@ -325,11 +320,34 @@ def _parse_retry_delay(err_str: str) -> int:
     return int(m.group(1)) + 2 if m else 60
 
 
+def _call_model_once(client: genai.Client, model: str, contents: list) -> str:
+    """1モデルへの generate_content を _GEMINI_CALL_TIMEOUT 秒で打ち切って返す。
+
+    SDK の HttpOptions.timeout はバージョンによって効かないケースがあるため、
+    ThreadPoolExecutor で確実にタイムアウトさせる。
+    タイムアウト時は RuntimeError を送出する（_generate_with_chain が次モデルへ進む）。
+    executor.shutdown(wait=False) でバックグラウンドスレッドを切り離し、
+    呼び出し元スレッド（Gunicorn ワーカー）がすぐに返れるようにする。
+    """
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    fut = executor.submit(client.models.generate_content, model=model, contents=contents)
+    try:
+        return fut.result(timeout=_GEMINI_CALL_TIMEOUT).text
+    except concurrent.futures.TimeoutError:
+        raise RuntimeError(
+            f"モデル {model} が {_GEMINI_CALL_TIMEOUT} 秒以内に応答しませんでした"
+        )
+    finally:
+        # wait=False でバックグラウンドスレッドを切り離す（ハングを引き継がない）
+        executor.shutdown(wait=False)
+
+
 def _generate_with_chain(client: genai.Client, contents: list) -> str:
     """モデルフォールバックチェーン付きで Gemini に問い合わせ、テキストを返す。
 
-    各モデルで最大2回試行する。クォータ枯渇時は次のモデルへ進む。
-    404/廃止エラーも同様にスキップする。全モデル失敗時は RuntimeError を送出。
+    各モデルで最大2回試行する（1回はレート制限時のリトライ）。
+    タイムアウト・404・廃止エラーは次のモデルへスキップ。
+    全モデル失敗時は RuntimeError を送出。
     """
     last_error = None
     tried: list = []
@@ -339,7 +357,11 @@ def _generate_with_chain(client: genai.Client, contents: list) -> str:
         retried = False
         for _ in range(2):
             try:
-                return client.models.generate_content(model=model, contents=contents).text
+                return _call_model_once(client, model, contents)
+            except RuntimeError as e:
+                # タイムアウト → 次のモデルへ
+                last_error = e
+                break
             except Exception as e:
                 err_str = str(e)
                 last_error = e
