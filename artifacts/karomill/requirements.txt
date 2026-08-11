@@ -1,5 +1,5 @@
 flask
-google-genai
+google-genai>=2.0.0
 gspread
 oauth2client
 gunicorn

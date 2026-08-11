@@ -53,18 +53,54 @@ def basic_auth_required(f):
 # ─────────────────────────────────────────────
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
-_default_first = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
-GEMINI_MODEL_CHAIN = [
-    _default_first,
+_FALLBACK_MODEL_CHAIN = [
+    os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"),
     "gemini-2.5-flash",
+    "gemini-flash-latest",
     "gemini-2.5-flash-lite",
-    "gemini-2.5-flash-preview-05-20",
+    "gemini-flash-lite-latest",
+    "gemini-3-flash-preview",
+    "gemini-3.1-flash-lite",
     "gemini-2.0-flash-lite",
-    "gemini-1.5-flash",
-    "gemini-1.5-flash-latest",
 ]
-seen: set = set()
-GEMINI_MODEL_CHAIN = [m for m in GEMINI_MODEL_CHAIN if not (m in seen or seen.add(m))]
+
+def _build_model_chain(api_key: str) -> list:
+    """APIで利用可能なflashモデルを検索し、優先順でチェーンを返す。失敗時はフォールバック。"""
+    preferred_order = [
+        "gemini-2.5-flash", "gemini-flash-latest",
+        "gemini-2.5-flash-lite", "gemini-flash-lite-latest",
+        "gemini-3-flash-preview", "gemini-3.1-flash-lite",
+        "gemini-3.1-flash-lite-preview", "gemini-2.0-flash-lite",
+    ]
+    if not api_key:
+        return _FALLBACK_MODEL_CHAIN
+    try:
+        client = genai.Client(api_key=api_key)
+        listed = list(client.models.list())
+        available: set = set()
+        for m in listed:
+            name = getattr(m, "name", "") or ""
+            short = name.replace("models/", "")
+            methods = str(
+                getattr(m, "supported_generation_methods", None)
+                or getattr(m, "supported_actions", None)
+                or ""
+            )
+            if "generateContent" in methods:
+                available.add(short)
+        # 優先順で並べた利用可能モデルのリスト
+        chain = [m for m in preferred_order if m in available]
+        # preferred にないが利用可能な flash 系をアルファベット順で追記
+        extras = sorted(n for n in available if "flash" in n and n not in chain)
+        chain.extend(extras)
+        if chain:
+            print(f"[Karomill] 利用可能モデル: {chain}", flush=True)
+            return chain
+    except Exception as e:
+        print(f"[Karomill] モデル検索失敗、フォールバック使用: {e}", flush=True)
+    return _FALLBACK_MODEL_CHAIN
+
+GEMINI_MODEL_CHAIN = _build_model_chain(GEMINI_API_KEY)
 
 GOOGLE_SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
 SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1z9PX6D_zbd1fhDDATzOOZNlLd3Ux1eMchoDBrMi7qCA/edit"
