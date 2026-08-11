@@ -1,0 +1,156 @@
+
+
+Live tail
+
+
+
+    )
+  File "/opt/render/project/src/.venv/lib/python3.14/site-packages/httpx/_client.py", line 942, in _send_handling_auth
+    response = self._send_handling_redirects(
+        request,
+        follow_redirects=follow_redirects,
+        history=history,
+    )
+  File "/opt/render/project/src/.venv/lib/python3.14/site-packages/httpx/_client.py", line 979, in _send_handling_redirects
+    response = self._send_single_request(request)
+  File "/opt/render/project/src/.venv/lib/python3.14/site-packages/httpx/_client.py", line 1014, in _send_single_request
+    response = transport.handle_request(request)
+  File "/opt/render/project/src/.venv/lib/python3.14/site-packages/httpx/_transports/default.py", line 250, in handle_request
+    resp = self._pool.handle_request(req)
+  File "/opt/render/project/src/.venv/lib/python3.14/site-packages/httpcore/_sync/connection_pool.py", line 256, in handle_request
+    raise exc from None
+  File "/opt/render/project/src/.venv/lib/python3.14/site-packages/httpcore/_sync/connection_pool.py", line 236, in handle_request
+    response = connection.handle_request(
+        pool_request.request
+    )
+  File "/opt/render/project/src/.venv/lib/python3.14/site-packages/httpcore/_sync/connection.py", line 103, in handle_request
+    return self._connection.handle_request(request)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^
+  File "/opt/render/project/src/.venv/lib/python3.14/site-packages/httpcore/_sync/http11.py", line 136, in handle_request
+    raise exc
+  File "/opt/render/project/src/.venv/lib/python3.14/site-packages/httpcore/_sync/http11.py", line 106, in handle_request
+    ) = self._receive_response_headers(**kwargs)
+        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^
+  File "/opt/render/project/src/.venv/lib/python3.14/site-packages/httpcore/_sync/http11.py", line 177, in _receive_response_headers
+    event = self._receive_event(timeout=timeout)
+  File "/opt/render/project/src/.venv/lib/python3.14/site-packages/httpcore/_sync/http11.py", line 217, in _receive_event
+    data = self._network_stream.read(
+        self.READ_NUM_BYTES, timeout=timeout
+    )
+  File "/opt/render/project/src/.venv/lib/python3.14/site-packages/httpcore/_backends/sync.py", line 128, in read
+    return self._sock.recv(max_bytes)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/opt/render/project/python/Python-3.14.3/lib/python3.14/ssl.py", line 1285, in recv
+    return self.read(buflen)
+           ~~~~~~~~~^^^^^^^^
+  File "/opt/render/project/python/Python-3.14.3/lib/python3.14/ssl.py", line 1140, in read
+    return self._sslobj.read(len)
+           ~~~~~~~~~~~~~~~~~^^^^^
+  File "/opt/render/project/src/.venv/lib/python3.14/site-packages/gunicorn/workers/base.py", line 198, in handle_abort
+    sys.exit(1)
+    ~~~~~~~~^^^
+SystemExit: 1
+[2026-08-11 12:06:57 +0000] [71] [INFO] Worker exiting (pid: 71)
+[2026-08-11 12:06:57 +0000] [64] [ERROR] Worker (pid:71) was sent SIGKILL! Perhaps out of memory?
+[2026-08-11 12:06:57 +0000] [75] [INFO] Booting worker with pid: 75
+[2026-08-11 12:06:57 +0000] [64] [INFO] Control socket listening at /opt/render/.gunicorn/gunicorn.ctl
+==> Deploying...
+==> Setting WEB_CONCURRENCY=1 by default, based on available CPUs in the instance
+[2026-08-11 12:17:50 +0000] [64] [INFO] Handling signal: term
+[2026-08-11 12:17:50 +0000] [73] [INFO] Worker exiting (pid: 73)
+[2026-08-11 12:17:50 +0000] [75] [INFO] Worker exiting (pid: 75)
+==> Your service is live 🎉
+==> 
+==> ///////////////////////////////////////////////////////////
+==> 
+==> Available at your primary URL https://karomill-record.onrender.com
+==> 
+==> ///////////////////////////////////////////////////////////
+==> Detected service running on port 10000
+==> Docs on specifying a port: https://render.com/docs/web-services#port-binding
+  File "/opt/render/project/src/.venv/lib/python3.14/site-packages/gunicorn/workers/sync.py", line 141, in handle
+    self.handle_request(listener, req, client, addr)
+    ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/render/project/src/.venv/lib/python3.14/site-packages/gunicorn/workers/sync.py", line 184, in handle_request
+    respiter = self.wsgi(environ, resp.start_response)
+  File "/opt/render/project/src/.venv/lib/python3.14/site-packages/flask/app.py", line 1536, in __call__
+    return self.wsgi_app(environ, start_response)
+           ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/render/project/src/.venv/lib/python3.14/site-packages/flask/app.py", line 1511, in wsgi_app
+    response = self.full_dispatch_request()
+  File "/opt/render/project/src/.venv/lib/python3.14/site-packages/flask/app.py", line 917, in full_dispatch_request
+    rv = self.dispatch_request()
+  File "/opt/render/project/src/.venv/lib/python3.14/site-packages/flask/app.py", line 902, in dispatch_request
+    return self.ensure_sync(self.view_functions[rule.endpoint])(**view_args)  # type: ignore[no-any-return]
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "/opt/render/project/src/artifacts/karomill/app.py", line 49, in decorated
+    return f(*args, **kwargs)
+  File "/opt/render/project/src/artifacts/karomill/app.py", line 866, in upload_video
+    data = analyze_video(tmp_path, mime_type, override_date=user_date)
+  File "/opt/render/project/src/artifacts/karomill/app.py", line 508, in analyze_video
+    response_text = _generate_with_chain(client, [video_file, VIDEO_PROMPT])
+  File "/opt/render/project/src/artifacts/karomill/app.py", line 360, in _generate_with_chain
+    return _call_model_once(client, model, contents)
+  File "/opt/render/project/src/artifacts/karomill/app.py", line 335, in _call_model_once
+    return fut.result(timeout=_GEMINI_CALL_TIMEOUT).text
+           ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/render/project/python/Python-3.14.3/lib/python3.14/concurrent/futures/_base.py", line 445, in result
+    self._condition.wait(timeout)
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^
+  File "/opt/render/project/python/Python-3.14.3/lib/python3.14/threading.py", line 373, in wait
+    gotit = waiter.acquire(True, timeout)
+  File "/opt/render/project/src/.venv/lib/python3.14/site-packages/gunicorn/workers/base.py", line 198, in handle_abort
+    sys.exit(1)
+    ~~~~~~~~^^^
+SystemExit: 1
+127.0.0.1 - - [11/Aug/2026:12:32:22 +0000] "POST /upload-video HTTP/1.1" 500 0 "-" "-"
+[2026-08-11 12:32:22 +0000] [67] [INFO] Worker exiting (pid: 67)
+[2026-08-11 12:32:23 +0000] [64] [ERROR] Worker (pid:67) was sent SIGKILL! Perhaps out of memory?
+[2026-08-11 12:32:23 +0000] [72] [INFO] Booting worker with pid: 72
+[2026-08-11 12:32:23 +0000] [64] [INFO] Control socket listening at /opt/render/.gunicorn/gunicorn.ctl
+127.0.0.1 - sato1201 [11/Aug/2026:12:32:28 +0000] "GET / HTTP/1.1" 200 28938 "https://karomill-record.onrender.com/" "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Mobile Safari/537.36"
+127.0.0.1 - sato1201 [11/Aug/2026:12:35:24 +0000] "GET / HTTP/1.1" 200 28938 "-" "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Mobile Safari/537.36"
+[2026-08-11 12:36:05 +0000] [64] [CRITICAL] WORKER TIMEOUT (pid:72)
+[2026-08-11 12:36:06 +0000] [72] [ERROR] Error handling request POST /upload-video
+Traceback (most recent call last):
+  File "/opt/render/project/src/.venv/lib/python3.14/site-packages/gunicorn/workers/sync.py", line 141, in handle
+    self.handle_request(listener, req, client, addr)
+    ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/render/project/src/.venv/lib/python3.14/site-packages/gunicorn/workers/sync.py", line 184, in handle_request
+    respiter = self.wsgi(environ, resp.start_response)
+  File "/opt/render/project/src/.venv/lib/python3.14/site-packages/flask/app.py", line 1536, in __call__
+    return self.wsgi_app(environ, start_response)
+           ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/render/project/src/.venv/lib/python3.14/site-packages/flask/app.py", line 1511, in wsgi_app
+    response = self.full_dispatch_request()
+  File "/opt/render/project/src/.venv/lib/python3.14/site-packages/flask/app.py", line 917, in full_dispatch_request
+    rv = self.dispatch_request()
+  File "/opt/render/project/src/.venv/lib/python3.14/site-packages/flask/app.py", line 902, in dispatch_request
+    return self.ensure_sync(self.view_functions[rule.endpoint])(**view_args)  # type: ignore[no-any-return]
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "/opt/render/project/src/artifacts/karomill/app.py", line 49, in decorated
+    return f(*args, **kwargs)
+  File "/opt/render/project/src/artifacts/karomill/app.py", line 866, in upload_video
+    data = analyze_video(tmp_path, mime_type, override_date=user_date)
+  File "/opt/render/project/src/artifacts/karomill/app.py", line 508, in analyze_video
+    response_text = _generate_with_chain(client, [video_file, VIDEO_PROMPT])
+  File "/opt/render/project/src/artifacts/karomill/app.py", line 360, in _generate_with_chain
+    return _call_model_once(client, model, contents)
+  File "/opt/render/project/src/artifacts/karomill/app.py", line 335, in _call_model_once
+127.0.0.1 - - [11/Aug/2026:12:36:06 +0000] "POST /upload-video HTTP/1.1" 500 0 "-" "-"
+    return fut.result(timeout=_GEMINI_CALL_TIMEOUT).text
+           ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/render/project/python/Python-3.14.3/lib/python3.14/concurrent/futures/_base.py", line 445, in result
+    self._condition.wait(timeout)
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^
+  File "/opt/render/project/python/Python-3.14.3/lib/python3.14/threading.py", line 373, in wait
+    gotit = waiter.acquire(True, timeout)
+  File "/opt/render/project/src/.venv/lib/python3.14/site-packages/gunicorn/workers/base.py", line 198, in handle_abort
+    sys.exit(1)
+    ~~~~~~~~^^^
+SystemExit: 1
+[2026-08-11 12:36:06 +0000] [72] [INFO] Worker exiting (pid: 72)
+[2026-08-11 12:36:06 +0000] [64] [ERROR] Worker (pid:72) was sent SIGKILL! Perhaps out of memory?
+[2026-08-11 12:36:06 +0000] [76] [INFO] Booting worker with pid: 76
+[2026-08-11 12:36:06 +0000] [64] [INFO] Control socket listening at /opt/render/.gunicorn/gunicorn.ctl
+127.0.0.1 - sato1201 [11/Aug/2026:12:36:12 +0000] "GET / HTTP/1.1" 200 28938 "-" "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Mobile Safari/537.36"
