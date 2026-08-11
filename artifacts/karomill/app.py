@@ -484,11 +484,11 @@ def analyze_detail(image_data: tuple) -> dict:
     return extract_json(call_gemini(image_data, DETAIL_PROMPT))
 
 
-def analyze_video(video_path: str, mime_type: str, override_date: str = "") -> dict:
-    """MP4動画ファイルを Gemini Files API で解析して merge_results 済み dict を返す。
+def _analyze_video_worker(video_path: str, mime_type: str, override_date: str) -> dict:
+    """analyze_video の実処理本体。ThreadPoolExecutor のスレッドで実行される。
 
-    video_path: 呼び出し元がディスクに保存済みのファイルパス（削除は呼び出し元が行う）
-    override_date が指定された場合、AIが読んだ日付より優先して使用する。
+    gthread ワーカーを使っている場合は呼び出しスレッドそのものが別スレッドなので
+    このラッパーは不要だが、sync ワーカーが使われてしまっている場合の保険になる。
     """
     client = _make_client()
     video_file = None
@@ -529,6 +529,33 @@ def analyze_video(video_path: str, mime_type: str, override_date: str = "") -> d
                 client.files.delete(name=video_file.name)
             except Exception:
                 pass
+
+
+# upload + polling + generate の合計タイムアウト（秒）
+# _GEMINI_CALL_TIMEOUT(=180) より大きく Gunicorn timeout(=300) より小さい値にする
+_VIDEO_TOTAL_TIMEOUT = 240
+
+
+def analyze_video(video_path: str, mime_type: str, override_date: str = "") -> dict:
+    """MP4動画ファイルを Gemini Files API で解析して merge_results 済み dict を返す。
+
+    video_path: 呼び出し元がディスクに保存済みのファイルパス（削除は呼び出し元が行う）
+    override_date が指定された場合、AIが読んだ日付より優先して使用する。
+
+    内部処理（upload → polling → generate_content）全体を _VIDEO_TOTAL_TIMEOUT 秒で打ち切る。
+    これにより sync ワーカーでも Gunicorn WORKER TIMEOUT の前に制御が返る。
+    """
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    fut = executor.submit(_analyze_video_worker, video_path, mime_type, override_date)
+    try:
+        return fut.result(timeout=_VIDEO_TOTAL_TIMEOUT)
+    except concurrent.futures.TimeoutError:
+        raise RuntimeError(
+            f"動画解析が {_VIDEO_TOTAL_TIMEOUT} 秒以内に完了しませんでした。"
+            "動画が長すぎるか Gemini API が混雑しています。しばらくしてから再試行してください。"
+        )
+    finally:
+        executor.shutdown(wait=False)
 
 # ──────────────────────────────────────────────────────────────
 # 数値変換・表示ユーティリティ
