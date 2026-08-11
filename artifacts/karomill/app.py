@@ -96,6 +96,22 @@ def _build_model_chain(api_key: str) -> list:
 
 GEMINI_MODEL_CHAIN: list = _build_model_chain(GEMINI_API_KEY)
 
+
+def _make_client() -> genai.Client:
+    """4分の HTTP タイムアウト付きの Gemini クライアントを返す。
+    
+    タイムアウトを設定しないと、generate_content がネットワーク障害時に
+    無限にハングし Gunicorn ワーカーが強制終了されて 500 になる。
+    """
+    try:
+        return genai.Client(
+            api_key=GEMINI_API_KEY,
+            http_options=types.HttpOptions(timeout=240_000),  # 4 分（ミリ秒）
+        )
+    except Exception:
+        # 古いバージョンの SDK が HttpOptions.timeout を未サポートの場合フォールバック
+        return genai.Client(api_key=GEMINI_API_KEY)
+
 # ──────────────────────────────────────────────────────────────
 # プロンプト
 # ──────────────────────────────────────────────────────────────
@@ -347,9 +363,8 @@ def _generate_with_chain(client: genai.Client, contents: list) -> str:
 def call_gemini(image_data: tuple, prompt: str) -> str:
     """画像1枚 + プロンプトで Gemini を呼び出しテキストを返す"""
     image_bytes, mime_type = image_data
-    client = genai.Client(api_key=GEMINI_API_KEY)
     contents = [types.Part.from_bytes(data=image_bytes, mime_type=mime_type), prompt]
-    return _generate_with_chain(client, contents)
+    return _generate_with_chain(_make_client(), contents)
 
 # ──────────────────────────────────────────────────────────────
 # JSON 抽出・パース
@@ -447,20 +462,16 @@ def analyze_detail(image_data: tuple) -> dict:
     return extract_json(call_gemini(image_data, DETAIL_PROMPT))
 
 
-def analyze_video(video_bytes: bytes, mime_type: str, override_date: str = "") -> dict:
-    """MP4動画を Gemini Files API で解析して merge_results 済み dict を返す。
+def analyze_video(video_path: str, mime_type: str, override_date: str = "") -> dict:
+    """MP4動画ファイルを Gemini Files API で解析して merge_results 済み dict を返す。
 
+    video_path: 呼び出し元がディスクに保存済みのファイルパス（削除は呼び出し元が行う）
     override_date が指定された場合、AIが読んだ日付より優先して使用する。
     """
-    client = genai.Client(api_key=GEMINI_API_KEY)
-
-    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
-        tmp.write(video_bytes)
-        tmp_path = tmp.name
-
+    client = _make_client()
     video_file = None
     try:
-        video_file = client.files.upload(file=tmp_path)
+        video_file = client.files.upload(file=video_path)
 
         # Files API 処理完了を待機（最大 90 秒 = 30回 × 3秒）
         for _ in range(30):
@@ -491,10 +502,6 @@ def analyze_video(video_bytes: bytes, mime_type: str, override_date: str = "") -
         return merge_results(summary, detail_list, override_date=override_date)
 
     finally:
-        try:
-            os.unlink(tmp_path)
-        except Exception:
-            pass
         if video_file:
             try:
                 client.files.delete(name=video_file.name)
@@ -827,10 +834,21 @@ def upload_video():
     if not GEMINI_API_KEY:
         return _error_response("GEMINI_API_KEY が設定されていません。")
 
+    # f.read() でメモリに全量展開せず、ディスクへ直接ストリーム保存（OOM対策）
+    mime_type = f.content_type or "video/mp4"
+    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+        f.save(tmp)
+        tmp_path = tmp.name
+
     try:
-        data = analyze_video(f.read(), f.content_type or "video/mp4", override_date=user_date)
+        data = analyze_video(tmp_path, mime_type, override_date=user_date)
     except Exception as e:
         return _error_response(f"AI解析エラー: {e}")
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
 
     try:
         tab_name = write_to_spreadsheet(data)
