@@ -53,15 +53,15 @@ def basic_auth_required(f):
 # ─────────────────────────────────────────────
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
-_default_first = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+_default_first = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 GEMINI_MODEL_CHAIN = [
     _default_first,
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-flash-preview-05-20",
     "gemini-2.0-flash-lite",
-    "gemini-2.0-flash-001",
-    "gemini-3.1-flash-lite",
-    "gemini-flash-lite-latest",
-    "gemini-3-flash-preview",
-    "gemini-3.5-flash",
+    "gemini-1.5-flash",
+    "gemini-1.5-flash-latest",
 ]
 seen: set = set()
 GEMINI_MODEL_CHAIN = [m for m in GEMINI_MODEL_CHAIN if not (m in seen or seen.add(m))]
@@ -307,10 +307,11 @@ def call_gemini(image_data: tuple, prompt: str) -> str:
                 err_str = str(e)
                 last_error = e
                 is_quota = "429" in err_str or "RESOURCE_EXHAUSTED" in err_str
-                if not is_quota:
-                    raise
+                # 404/廃止モデルは次のモデルへスキップ（クォータ判定の前に確認）
                 if _is_skip_model_error(err_str):
                     break
+                if not is_quota:
+                    raise
                 if not per_minute_retried:
                     per_minute_retried = True
                     time.sleep(_parse_retry_delay(err_str))
@@ -320,7 +321,7 @@ def call_gemini(image_data: tuple, prompt: str) -> str:
 
     tried = ", ".join(tried_models)
     raise RuntimeError(
-        f"すべてのモデルでクォータが枯渇（試行: {tried}）。しばらく時間をおいて再試行してください。\n詳細: {last_error}"
+        f"すべてのモデルで失敗（試行: {tried}）。しばらく時間をおいて再試行してください。\n詳細: {last_error}"
     )
 
 
@@ -470,10 +471,11 @@ def analyze_video(video_bytes: bytes, mime_type: str) -> dict:
                     err_str = str(e)
                     last_error = e
                     is_quota = "429" in err_str or "RESOURCE_EXHAUSTED" in err_str
-                    if not is_quota:
-                        raise
+                    # 404/廃止モデルは次のモデルへスキップ
                     if _is_skip_model_error(err_str):
                         break
+                    if not is_quota:
+                        raise
                     if not per_minute_retried:
                         per_minute_retried = True
                         time.sleep(_parse_retry_delay(err_str))
