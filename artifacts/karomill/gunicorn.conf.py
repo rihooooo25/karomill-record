@@ -11,6 +11,6 @@ import os
 
 worker_class = "gthread"
 workers = 1
-threads = 4
-timeout = 300            # バックストップ（アプリ内で 180s のタイムアウトが先に発火する）
+threads = 2      # 4→2: 同時スレッド数を削減してメモリ使用量を抑制
+timeout = 300    # バックストップ（アプリ内で 90s/モデルのタイムアウトが先に発火する）
 bind = f"0.0.0.0:{os.environ.get('PORT', '10000')}"

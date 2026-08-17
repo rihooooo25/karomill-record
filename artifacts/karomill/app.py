@@ -2,6 +2,7 @@
 カロミル食事スクショ → Googleスプレッドシート自動記録アプリ
 """
 import concurrent.futures
+import gc
 import json
 import os
 import re
@@ -35,14 +36,15 @@ WEEKDAYS                    = ["月", "火", "水", "木", "金", "土", "日"]
 COUNT_UNITS                 = {"個", "本", "枚", "株", "杯", "缶", "食", "袋", "切", "片"}
 
 # ──────────────────────────────────────────────────────────────
-# 動画ジョブキュー（in-memory）
+# 動画ジョブキュー（in-memory、TTL 付き自動クリーンアップ）
 # ──────────────────────────────────────────────────────────────
-# job_id -> {"status": "processing"|"done"|"error", ...result fields}
-_JOBS: dict = {}
+_JOBS: dict = {}          # job_id -> {"status":..., "created_at": float, ...}
 _JOBS_LOCK = threading.Lock()
+_JOB_TTL = 600            # 完了ジョブの保持時間（秒）= 10分
 
 
 def _job_set(job_id: str, payload: dict) -> None:
+    payload.setdefault("created_at", time.time())
     with _JOBS_LOCK:
         _JOBS[job_id] = payload
 
@@ -52,12 +54,29 @@ def _job_get(job_id: str) -> dict | None:
         return _JOBS.get(job_id)
 
 
+def _job_cleanup() -> None:
+    """完了から _JOB_TTL 秒以上経過したジョブをメモリから削除する。
+    ポーリングエンドポイントから呼ぶことで定期的に実行される。
+    """
+    cutoff = time.time() - _JOB_TTL
+    with _JOBS_LOCK:
+        expired = [
+            jid for jid, j in _JOBS.items()
+            if j.get("status") == "done" and j.get("created_at", 0) < cutoff
+        ]
+        for jid in expired:
+            del _JOBS[jid]
+    if expired:
+        print(f"[Karomill] ジョブクリーンアップ: {len(expired)} 件削除", flush=True)
+
+
 def _run_video_job(job_id: str, video_path: str, mime_type: str, user_date: str) -> None:
     """バックグラウンドスレッドで動画解析→スプレッドシート書き込みを実行する"""
     try:
         data = analyze_video(video_path, mime_type, override_date=user_date)
         try:
             tab_name = write_to_spreadsheet(data)
+            # ── 表示に必要な最小フィールドのみ保存（data 全体は保持しない → メモリ節約）
             _job_set(job_id, {
                 "status":      "done",
                 "success":     True,
@@ -65,7 +84,6 @@ def _run_video_job(job_id: str, video_path: str, mime_type: str, user_date: str)
                 "date":        data.get("date"),
                 "weight":      data.get("weight"),
                 "gemini_text": data.get("_gemini_text", ""),
-                "data":        {k: v for k, v in data.items() if k != "_gemini_text"},
             })
         except Exception as e:
             _job_set(job_id, {
@@ -73,8 +91,9 @@ def _run_video_job(job_id: str, video_path: str, mime_type: str, user_date: str)
                 "success":     False,
                 "error":       f"スプレッドシート書き込みエラー: {e}",
                 "gemini_text": data.get("_gemini_text", ""),
-                "data":        {k: v for k, v in data.items() if k != "_gemini_text"},
             })
+        finally:
+            del data   # 大きな dict を明示的に解放
     except Exception as e:
         _job_set(job_id, {
             "status":  "done",
@@ -86,6 +105,7 @@ def _run_video_job(job_id: str, video_path: str, mime_type: str, user_date: str)
             os.unlink(video_path)
         except Exception:
             pass
+        gc.collect()   # 動画処理後にGCを強制実行してメモリをOSに返す
 
 
 # ──────────────────────────────────────────────────────────────
@@ -643,6 +663,7 @@ def _build_video_contents(client: genai.Client, video_path: str, mime_type: str)
                 types.Part.from_bytes(data=video_bytes, mime_type="video/mp4"),
                 VIDEO_PROMPT,
             ]
+            del video_bytes   # バイト列の参照を即解放（GCに任せず明示）
             return contents, None
 
         # ── Files API 経由（圧縮しても 15 MB 超の場合）
@@ -676,6 +697,7 @@ def analyze_video(video_path: str, mime_type: str, override_date: str = "") -> d
     try:
         contents, video_file = _build_video_contents(client, video_path, mime_type)
         response_text = _generate_with_chain(client, contents)
+        del contents   # 動画バイト列を含む大きなリストを即解放
         raw = extract_json(response_text)
 
         summary = {
@@ -1068,16 +1090,18 @@ def upload_video():
 @app.route("/job-status/<job_id>")
 @basic_auth_required
 def job_status(job_id: str):
-    """ジョブの現在状態を返す。
+    """ジョブの現在状態を返す。ポーリングのたびに期限切れジョブを清掃する。
 
     status: "processing" → まだ実行中
     status: "done"       → 完了（success=True/False を確認）
     """
+    _job_cleanup()   # 古い完了ジョブをメモリから削除
     job = _job_get(job_id)
     if job is None:
         return jsonify({"status": "not_found", "success": False,
                         "error": "ジョブが見つかりません。"}), 404
-    return jsonify(job)
+    # created_at はクライアントに不要なので除外
+    return jsonify({k: v for k, v in job.items() if k != "created_at"})
 
 
 @app.route("/test-connection")
