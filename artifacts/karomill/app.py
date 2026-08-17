@@ -314,10 +314,32 @@ def _is_skip_model_error(err_str: str) -> bool:
     ))
 
 
+def _is_retryable_error(err_str: str) -> bool:
+    """リトライで回復が期待できる一時的エラーか判定する。
+
+    - 429 / RESOURCE_EXHAUSTED : クォータ枯渇（推奨待機時間あり）
+    - 503 / UNAVAILABLE        : モデル高負荷（短時間待機で回復することが多い）
+    - 500 / INTERNAL           : 一時的なサーバーエラー
+    """
+    return any(k in err_str for k in (
+        "429", "RESOURCE_EXHAUSTED",
+        "503", "UNAVAILABLE",
+        "500", "INTERNAL",
+    ))
+
+
 def _parse_retry_delay(err_str: str) -> int:
-    """レート制限エラーから推奨待機秒数を読み取る"""
+    """エラーから推奨待機秒数を読み取る。
+    - 429 : Retry-After ヘッダ相当の値が含まれている場合はそれを使う。なければ 60 秒。
+    - 503 / 500 : 高負荷・一時エラーなので短め (15 秒) で十分なことが多い。
+    """
     m = re.search(r"retry[_ ]?(?:in|delay)[^\d]*(\d+)", err_str, re.IGNORECASE)
-    return int(m.group(1)) + 2 if m else 60
+    if m:
+        return int(m.group(1)) + 2
+    # 503/500 は推奨待機秒が含まれないので短めのデフォルト
+    if "503" in err_str or "UNAVAILABLE" in err_str or "500" in err_str:
+        return 15
+    return 60  # 429 のデフォルト
 
 
 def _call_model_once(client: genai.Client, model: str, contents: list) -> str:
@@ -367,8 +389,7 @@ def _generate_with_chain(client: genai.Client, contents: list) -> str:
                 last_error = e
                 if _is_skip_model_error(err_str):
                     break  # このモデルはスキップ → 次へ
-                is_quota = "429" in err_str or "RESOURCE_EXHAUSTED" in err_str
-                if not is_quota:
+                if not _is_retryable_error(err_str):
                     raise  # 予期しないエラーはそのまま送出
                 if not retried:
                     retried = True
