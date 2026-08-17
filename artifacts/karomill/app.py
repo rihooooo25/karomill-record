@@ -157,7 +157,7 @@ GEMINI_MODEL_CHAIN: list = _build_model_chain(GEMINI_API_KEY)
 # Gemini API 呼び出し1回あたりのタイムアウト（秒）
 # Gunicorn の --timeout より短くすることで、タイムアウト時に
 # ワーカーが強制終了される前にクリーンなエラーレスポンスを返せる。
-_GEMINI_CALL_TIMEOUT = 180  # 3分
+_GEMINI_CALL_TIMEOUT = 90   # 90秒 / モデルあたり（フォールバックチェーン全体でも十分な速度を確保）
 
 
 def _make_client() -> genai.Client:
@@ -887,6 +887,20 @@ def write_to_spreadsheet(data: dict) -> str:
     if not GOOGLE_SERVICE_ACCOUNT_JSON:
         raise ValueError("GOOGLE_SERVICE_ACCOUNT_JSON が設定されていません。")
 
+    # ── 日付バリデーション（空・不正形式は早期エラー）
+    date_str = (data.get("date") or "").strip()
+    if not date_str:
+        raise ValueError(
+            "日付が取得できませんでした。動画に「帳尻合わせ」画面が映っているか確認してください。"
+        )
+    try:
+        record_date = parse_record_date(date_str)
+    except Exception:
+        raise ValueError(
+            f"日付「{date_str}」を解析できませんでした（期待形式: M/D 例: 7/30）。"
+            "動画の日付表示が正しく読み取れているか確認してください。"
+        )
+
     sa_info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
     scope = [
         "https://spreadsheets.google.com/feeds",
@@ -895,7 +909,6 @@ def write_to_spreadsheet(data: dict) -> str:
     gc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(sa_info, scope))
     spreadsheet = gc.open_by_url(SPREADSHEET_URL)
 
-    record_date = parse_record_date(data["date"])
     tab_name = f"{get_week_number(record_date)}週目"
 
     try:
@@ -903,14 +916,16 @@ def write_to_spreadsheet(data: dict) -> str:
     except gspread.exceptions.WorksheetNotFound:
         raise ValueError(f"タブ「{tab_name}」が見つかりません。スプレッドシートに追加してください。")
 
-    date_str = data["date"]
     q_col = worksheet.col_values(17)
     row_n = next(
         (i for i, v in enumerate(q_col, start=1) if v.strip() == date_str),
         None,
     )
     if row_n is None:
-        raise ValueError(f"タブ「{tab_name}」のQ列に「{date_str}」が見つかりませんでした。")
+        raise ValueError(
+            f"タブ「{tab_name}」のQ列に「{date_str}」が見つかりませんでした。\n"
+            f"Q列の値: {[v for v in q_col if v.strip()][:10]}"  # 最初の10件を表示してデバッグ支援
+        )
 
     def col(letter: str, row: int) -> str:
         return f"{letter}{row}"
