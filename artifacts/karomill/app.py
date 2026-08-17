@@ -108,6 +108,46 @@ def _run_video_job(job_id: str, video_path: str, mime_type: str, user_date: str)
         gc.collect()   # 動画処理後にGCを強制実行してメモリをOSに返す
 
 
+def _run_frames_job(job_id: str, frame_paths: list, user_date: str) -> None:
+    """バックグラウンドスレッドでフレーム解析→スプレッドシート書き込みを実行する。
+    フロントエンドが動画からフレーム抽出した JPEG 群を受け取るパス。
+    """
+    try:
+        data = analyze_frames(frame_paths, override_date=user_date)
+        try:
+            tab_name = write_to_spreadsheet(data)
+            _job_set(job_id, {
+                "status":      "done",
+                "success":     True,
+                "tab":         tab_name,
+                "date":        data.get("date"),
+                "weight":      data.get("weight"),
+                "gemini_text": data.get("_gemini_text", ""),
+            })
+        except Exception as e:
+            _job_set(job_id, {
+                "status":      "done",
+                "success":     False,
+                "error":       f"スプレッドシート書き込みエラー: {e}",
+                "gemini_text": data.get("_gemini_text", ""),
+            })
+        finally:
+            del data
+    except Exception as e:
+        _job_set(job_id, {
+            "status":  "done",
+            "success": False,
+            "error":   f"AI解析エラー: {e}",
+        })
+    finally:
+        for p in frame_paths:
+            try:
+                os.unlink(p)
+            except Exception:
+                pass
+        gc.collect()
+
+
 # ──────────────────────────────────────────────────────────────
 # Basic 認証
 # ──────────────────────────────────────────────────────────────
@@ -722,6 +762,55 @@ def analyze_video(video_path: str, mime_type: str, override_date: str = "") -> d
             except Exception:
                 pass
 
+
+def analyze_frames(frame_paths: list, override_date: str = "") -> dict:
+    """フレーム画像群（JPEG）を Gemini で解析して merge_results 済み dict を返す。
+
+    フロントエンドが動画から 1 秒ごとに切り出した JPEG フレームを受け取り、
+    動画解析と同等の結果を画像解析で高速に得る。
+    - 送信データ量: 動画 ~40 MB → フレーム ~1〜2 MB（20〜40 倍の削減）
+    - 処理時間: 動画解析 ~60〜120s → フレーム解析 ~10〜20s
+    """
+    client = _make_client()
+
+    # ── フレームを contents リストへ順番に追加
+    contents = []
+    for path in frame_paths:
+        with open(path, "rb") as f:
+            img_bytes = f.read()
+        contents.append(types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"))
+        del img_bytes   # 即解放
+
+    # 動画から抽出したフレームであることをモデルに伝えた上で既存プロンプトを適用
+    frames_context = (
+        f"以下は動画から1秒ごとに抽出したフレーム画像（計{len(frame_paths)}枚）です。"
+        "時系列順に並んでいます。各画面に表示されているすべての情報を画像全体から読み取ってください。\n\n"
+    )
+    contents.append(frames_context + VIDEO_PROMPT)
+
+    try:
+        response_text = _generate_with_chain(client, contents)
+        del contents
+        raw = extract_json(response_text)
+
+        summary = {
+            "date":            raw.get("date", ""),
+            "weight":          raw.get("weight"),
+            "sleep":           raw.get("sleep", ""),
+            "total_kcal":      raw.get("total_kcal"),
+            "total_P":         raw.get("total_P"),
+            "total_F":         raw.get("total_F"),
+            "total_C":         raw.get("total_C"),
+            "self_evaluation": raw.get("self_evaluation", ""),
+            "exercise_notes":  raw.get("exercise_notes", ""),
+            "exercise":        raw.get("exercise", []),
+        }
+        detail_list = [{"meals": raw.get("meals", [])}]
+        return merge_results(summary, detail_list, override_date=override_date)
+    finally:
+        pass
+
+
 # ──────────────────────────────────────────────────────────────
 # 数値変換・表示ユーティリティ
 # ──────────────────────────────────────────────────────────────
@@ -1083,6 +1172,51 @@ def upload_video():
         daemon=True,
     )
     t.start()
+
+    return jsonify({"job_id": job_id, "status": "processing"})
+
+
+@app.route("/upload-frames", methods=["POST"])
+@basic_auth_required
+def upload_frames():
+    """フロントエンドが抽出したフレーム画像群を受け取り、バックグラウンドで解析して job_id を即返す。
+
+    動画をそのまま送る /upload-video と同じジョブキュー方式を採用。
+    フレーム画像（JPEG）を frames[] フィールドで受け取る。
+    """
+    frames = request.files.getlist("frames")
+    user_date = request.form.get("date", "").strip()
+
+    if not frames:
+        return _error_response("フレームが送信されていません。", status=400)
+    if len(frames) > 120:
+        return _error_response("フレーム数が多すぎます（最大 120 枚）。", status=400)
+    if not GEMINI_API_KEY:
+        return _error_response("GEMINI_API_KEY が設定されていません。")
+
+    # フレームをディスクへ保存（OOM 対策：メモリに保持しない）
+    frame_paths = []
+    try:
+        for f in frames:
+            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+                f.save(tmp)
+                frame_paths.append(tmp.name)
+    except Exception as e:
+        for p in frame_paths:
+            try: os.unlink(p)
+            except Exception: pass
+        return _error_response(f"フレームの保存に失敗しました: {e}")
+
+    job_id = str(uuid.uuid4())
+    _job_set(job_id, {"status": "processing"})
+
+    t = threading.Thread(
+        target=_run_frames_job,
+        args=(job_id, frame_paths, user_date),
+        daemon=True,
+    )
+    t.start()
+    print(f"[Karomill] フレームジョブ開始: {job_id} ({len(frames)} フレーム)", flush=True)
 
     return jsonify({"job_id": job_id, "status": "processing"})
 
