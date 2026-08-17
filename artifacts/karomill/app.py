@@ -5,6 +5,7 @@ import concurrent.futures
 import json
 import os
 import re
+import subprocess
 import tempfile
 import threading
 import time
@@ -566,37 +567,102 @@ def analyze_detail(image_data: tuple) -> dict:
 _INLINE_VIDEO_LIMIT = 15 * 1024 * 1024  # 15 MB
 
 
-def _build_video_contents(client: genai.Client, video_path: str, mime_type: str):
-    """動画サイズに応じてコンテンツリストを返す。
+def _compress_video(input_path: str) -> str:
+    """ffmpeg でスクリーン録画向けの高圧縮を行い、一時ファイルパスを返す。
 
-    ≤ 15 MB → Part.from_bytes でインライン送信（Files API 不要 → 大幅に速い）
-    > 15 MB → Files API upload → PROCESSING 完了待ち → file object で送信
+    - 解像度: 幅 720 px 以下（縦向きはそのまま）
+    - CRF 28: 品質係数（スクリーン録画の文字・UI が読める最低限の画質）
+    - preset ultrafast: 圧縮速度を最優先（サーバーサイド処理の待ち時間を最小化）
+    - 音声なし: スクリーン録画の解析に音声は不要
+    40 MB のスクリーン録画 → 3〜8 MB 程度に圧縮される見込み。
+    """
+    with tempfile.NamedTemporaryFile(suffix="_c.mp4", delete=False) as tmp:
+        out_path = tmp.name
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", input_path,
+        "-vf", "scale='min(720,iw)':-2",
+        "-c:v", "libx264",
+        "-crf", "28",
+        "-preset", "ultrafast",
+        "-an",           # 音声なし
+        out_path,
+    ]
+    result = subprocess.run(cmd, capture_output=True, timeout=120)
+    if result.returncode != 0:
+        try:
+            os.unlink(out_path)
+        except Exception:
+            pass
+        raise RuntimeError(
+            f"動画の圧縮に失敗しました: {result.stderr.decode(errors='replace')[:300]}"
+        )
+    return out_path
+
+
+def _build_video_contents(client: genai.Client, video_path: str, mime_type: str):
+    """動画サイズ・圧縮結果に応じて最速の送信経路を選択する。
+
+    経路:
+      ① 元ファイル ≤ 15 MB          → そのままインライン送信
+      ② 元ファイル > 15 MB かつ
+         ffmpeg 圧縮後 ≤ 15 MB      → 圧縮版をインライン送信
+      ③ 圧縮後も > 15 MB            → 圧縮版で Files API 送信（ポーリング 1 秒間隔）
+      ④ ffmpeg が使えない            → 元ファイルで Files API 送信（フォールバック）
+
     戻り値: (contents_list, video_file_or_None)
-             video_file_or_None は後で delete するために返す（インライン時は None）
     """
     file_size = os.path.getsize(video_path)
+    compressed_path = None
 
-    if file_size <= _INLINE_VIDEO_LIMIT:
-        # ── インライン送信（Upload + Polling の2〜3分を完全スキップ）
-        with open(video_path, "rb") as f:
-            video_bytes = f.read()
-        contents = [
-            types.Part.from_bytes(data=video_bytes, mime_type=mime_type),
-            VIDEO_PROMPT,
-        ]
-        return contents, None
+    try:
+        # 15 MB 超 → まず ffmpeg で圧縮を試みる
+        if file_size > _INLINE_VIDEO_LIMIT:
+            try:
+                compressed_path = _compress_video(video_path)
+                c_size = os.path.getsize(compressed_path)
+                print(
+                    f"[Karomill] 圧縮: {file_size/1024/1024:.1f} MB "
+                    f"→ {c_size/1024/1024:.1f} MB",
+                    flush=True,
+                )
+                work_path = compressed_path
+            except Exception as e:
+                print(f"[Karomill] 圧縮失敗、元ファイルで続行: {e}", flush=True)
+                work_path = video_path
+        else:
+            work_path = video_path
 
-    # ── Files API 経由（15 MB 超の大きい動画）
-    video_file = client.files.upload(file=video_path)
-    # 処理完了を待機（最大 90 秒、1秒おきにポーリング）
-    for _ in range(90):
-        if "PROCESSING" not in str(video_file.state):
-            break
-        time.sleep(1)
-        video_file = client.files.get(name=video_file.name)
-    if "FAILED" in str(video_file.state):
-        raise RuntimeError("動画のGemini処理に失敗しました。別の動画で試してください。")
-    return [video_file, VIDEO_PROMPT], video_file
+        work_size = os.path.getsize(work_path)
+
+        if work_size <= _INLINE_VIDEO_LIMIT:
+            # ── インライン送信（最速）
+            with open(work_path, "rb") as f:
+                video_bytes = f.read()
+            contents = [
+                types.Part.from_bytes(data=video_bytes, mime_type="video/mp4"),
+                VIDEO_PROMPT,
+            ]
+            return contents, None
+
+        # ── Files API 経由（圧縮しても 15 MB 超の場合）
+        video_file = client.files.upload(file=work_path)
+        for _ in range(90):
+            if "PROCESSING" not in str(video_file.state):
+                break
+            time.sleep(1)
+            video_file = client.files.get(name=video_file.name)
+        if "FAILED" in str(video_file.state):
+            raise RuntimeError("動画のGemini処理に失敗しました。別の動画で試してください。")
+        return [video_file, VIDEO_PROMPT], video_file
+
+    finally:
+        # 圧縮済み一時ファイルは ここで削除（アップロード済み or バイト読み込み済みなので安全）
+        if compressed_path:
+            try:
+                os.unlink(compressed_path)
+            except Exception:
+                pass
 
 
 def analyze_video(video_path: str, mime_type: str, override_date: str = "") -> dict:

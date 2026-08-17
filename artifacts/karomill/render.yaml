@@ -3,7 +3,7 @@ services:
     name: karomill
     runtime: python
     rootDir: artifacts/karomill
-    buildCommand: pip install -r requirements.txt
+    buildCommand: apt-get install -y ffmpeg && pip install -r requirements.txt
     startCommand: gunicorn app:app -c gunicorn.conf.py
     envVars:
       - key: GEMINI_API_KEY
