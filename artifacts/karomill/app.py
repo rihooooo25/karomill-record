@@ -6,7 +6,9 @@ import json
 import os
 import re
 import tempfile
+import threading
 import time
+import uuid
 from datetime import date, datetime
 from functools import wraps
 
@@ -30,6 +32,60 @@ SPREADSHEET_URL             = "https://docs.google.com/spreadsheets/d/1z9PX6D_zb
 START_DATE                  = date(2026, 3, 31)
 WEEKDAYS                    = ["月", "火", "水", "木", "金", "土", "日"]
 COUNT_UNITS                 = {"個", "本", "枚", "株", "杯", "缶", "食", "袋", "切", "片"}
+
+# ──────────────────────────────────────────────────────────────
+# 動画ジョブキュー（in-memory）
+# ──────────────────────────────────────────────────────────────
+# job_id -> {"status": "processing"|"done"|"error", ...result fields}
+_JOBS: dict = {}
+_JOBS_LOCK = threading.Lock()
+
+
+def _job_set(job_id: str, payload: dict) -> None:
+    with _JOBS_LOCK:
+        _JOBS[job_id] = payload
+
+
+def _job_get(job_id: str) -> dict | None:
+    with _JOBS_LOCK:
+        return _JOBS.get(job_id)
+
+
+def _run_video_job(job_id: str, video_path: str, mime_type: str, user_date: str) -> None:
+    """バックグラウンドスレッドで動画解析→スプレッドシート書き込みを実行する"""
+    try:
+        data = analyze_video(video_path, mime_type, override_date=user_date)
+        try:
+            tab_name = write_to_spreadsheet(data)
+            _job_set(job_id, {
+                "status":      "done",
+                "success":     True,
+                "tab":         tab_name,
+                "date":        data.get("date"),
+                "weight":      data.get("weight"),
+                "gemini_text": data.get("_gemini_text", ""),
+                "data":        {k: v for k, v in data.items() if k != "_gemini_text"},
+            })
+        except Exception as e:
+            _job_set(job_id, {
+                "status":      "done",
+                "success":     False,
+                "error":       f"スプレッドシート書き込みエラー: {e}",
+                "gemini_text": data.get("_gemini_text", ""),
+                "data":        {k: v for k, v in data.items() if k != "_gemini_text"},
+            })
+    except Exception as e:
+        _job_set(job_id, {
+            "status":  "done",
+            "success": False,
+            "error":   f"AI解析エラー: {e}",
+        })
+    finally:
+        try:
+            os.unlink(video_path)
+        except Exception:
+            pass
+
 
 # ──────────────────────────────────────────────────────────────
 # Basic 認証
@@ -896,6 +952,11 @@ def upload():
 @app.route("/upload-video", methods=["POST"])
 @basic_auth_required
 def upload_video():
+    """動画ファイルを受け取り、バックグラウンドで処理して job_id を即返す。
+
+    クライアントは /job-status/<job_id> をポーリングして結果を取得する。
+    これにより、Gunicorn の worker timeout / TCP 切断の問題を完全に回避する。
+    """
     f = request.files.get("video")
     user_date = request.form.get("date", "").strip()
 
@@ -904,28 +965,38 @@ def upload_video():
     if not GEMINI_API_KEY:
         return _error_response("GEMINI_API_KEY が設定されていません。")
 
-    # f.read() でメモリに全量展開せず、ディスクへ直接ストリーム保存（OOM対策）
+    # ディスクへ直接ストリーム保存（OOM対策）
     mime_type = f.content_type or "video/mp4"
     with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
         f.save(tmp)
         tmp_path = tmp.name
 
-    try:
-        data = analyze_video(tmp_path, mime_type, override_date=user_date)
-    except Exception as e:
-        return _error_response(f"AI解析エラー: {e}")
-    finally:
-        try:
-            os.unlink(tmp_path)
-        except Exception:
-            pass
+    job_id = str(uuid.uuid4())
+    _job_set(job_id, {"status": "processing"})
 
-    try:
-        tab_name = write_to_spreadsheet(data)
-    except Exception as e:
-        return _error_response(f"スプレッドシート書き込みエラー: {e}", data=data)
+    t = threading.Thread(
+        target=_run_video_job,
+        args=(job_id, tmp_path, mime_type, user_date),
+        daemon=True,
+    )
+    t.start()
 
-    return _success_response(data, tab_name)
+    return jsonify({"job_id": job_id, "status": "processing"})
+
+
+@app.route("/job-status/<job_id>")
+@basic_auth_required
+def job_status(job_id: str):
+    """ジョブの現在状態を返す。
+
+    status: "processing" → まだ実行中
+    status: "done"       → 完了（success=True/False を確認）
+    """
+    job = _job_get(job_id)
+    if job is None:
+        return jsonify({"status": "not_found", "success": False,
+                        "error": "ジョブが見つかりません。"}), 404
+    return jsonify(job)
 
 
 @app.route("/test-connection")

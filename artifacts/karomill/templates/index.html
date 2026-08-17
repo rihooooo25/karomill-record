@@ -814,16 +814,61 @@
       resultDiv.style.display = 'none';
       geminiOut.style.display = 'none';
       btnReset.style.display = 'none';
+
       const sizeMB = (selectedVideo.size / 1024 / 1024).toFixed(1);
-      setLoading(true, `動画アップロード中… (${sizeMB}MB) AI解析まで最大4〜5分かかる場合があります`);
+
+      // ── Step 1: 動画をサーバーへアップロード（job_id を即受け取る）
+      setLoading(true, `動画をアップロード中… (${sizeMB} MB)`);
       const fd = new FormData();
       fd.append('video', selectedVideo);
       fd.append('date', getSelectedDateMD());
-      // 動画は upload + Gemini 処理が長いため 270 秒（サーバー側 240s より余裕をもたせる）
-      const json = await postForm('/upload-video', fd, 270_000);
+      const startResp = await postForm('/upload-video', fd, 120_000);
+
+      if (!startResp.job_id) {
+        // バリデーションエラーなど即時エラーはそのまま表示
+        setLoading(false);
+        showResult(startResp);
+        return;
+      }
+
+      // ── Step 2: 完了までポーリング（3秒おき・最大 6 分）
+      const result = await pollJobStatus(startResp.job_id, 360_000);
       setLoading(false);
-      showResult(json);
+      showResult(result);
     });
+
+    /**
+     * ジョブ完了まで /job-status/<id> をポーリングする。
+     * @param {string} jobId
+     * @param {number} maxWaitMs   タイムアウト（ミリ秒）
+     */
+    async function pollJobStatus(jobId, maxWaitMs = 360_000) {
+      const startTime = Date.now();
+      const POLL_INTERVAL = 3000; // 3 秒おき
+
+      while (Date.now() - startTime < maxWaitMs) {
+        await new Promise(r => setTimeout(r, POLL_INTERVAL));
+        const elapsed = Math.round((Date.now() - startTime) / 1000);
+        setLoading(true, `AI解析中… ${elapsed} 秒経過（最大 4〜5 分かかる場合があります）`);
+
+        try {
+          const resp = await fetch(`/job-status/${jobId}`, {
+            signal: AbortSignal.timeout(10_000),
+          });
+          if (!resp.ok) continue; // 一時的な HTTP エラーはスキップ
+          const data = await resp.json();
+          if (data.status === 'done') return data;
+          // status === 'processing' の場合は次のループへ
+        } catch (_) {
+          // ネットワーク瞬断は無視して継続ポーリング
+        }
+      }
+
+      return {
+        success: false,
+        error: '⏱ 処理が 6 分以内に完了しませんでした。動画が長すぎるか Gemini API が混雑しています。しばらく時間をおいて再試行してください。',
+      };
+    }
 
     function resetVideo() {
       selectedVideo = null;
