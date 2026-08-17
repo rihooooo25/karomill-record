@@ -561,28 +561,55 @@ def analyze_detail(image_data: tuple) -> dict:
     return extract_json(call_gemini(image_data, DETAIL_PROMPT))
 
 
-def _analyze_video_worker(video_path: str, mime_type: str, override_date: str) -> dict:
-    """analyze_video の実処理本体。ThreadPoolExecutor のスレッドで実行される。
+# 15 MB 以下の動画はインライン送信（Files API アップロード＋ポーリングをスキップ）
+# Gemini の inline data 上限は 20 MB。余裕を持って 15 MB を境界とする。
+_INLINE_VIDEO_LIMIT = 15 * 1024 * 1024  # 15 MB
 
-    gthread ワーカーを使っている場合は呼び出しスレッドそのものが別スレッドなので
-    このラッパーは不要だが、sync ワーカーが使われてしまっている場合の保険になる。
+
+def _build_video_contents(client: genai.Client, video_path: str, mime_type: str):
+    """動画サイズに応じてコンテンツリストを返す。
+
+    ≤ 15 MB → Part.from_bytes でインライン送信（Files API 不要 → 大幅に速い）
+    > 15 MB → Files API upload → PROCESSING 完了待ち → file object で送信
+    戻り値: (contents_list, video_file_or_None)
+             video_file_or_None は後で delete するために返す（インライン時は None）
+    """
+    file_size = os.path.getsize(video_path)
+
+    if file_size <= _INLINE_VIDEO_LIMIT:
+        # ── インライン送信（Upload + Polling の2〜3分を完全スキップ）
+        with open(video_path, "rb") as f:
+            video_bytes = f.read()
+        contents = [
+            types.Part.from_bytes(data=video_bytes, mime_type=mime_type),
+            VIDEO_PROMPT,
+        ]
+        return contents, None
+
+    # ── Files API 経由（15 MB 超の大きい動画）
+    video_file = client.files.upload(file=video_path)
+    # 処理完了を待機（最大 90 秒、1秒おきにポーリング）
+    for _ in range(90):
+        if "PROCESSING" not in str(video_file.state):
+            break
+        time.sleep(1)
+        video_file = client.files.get(name=video_file.name)
+    if "FAILED" in str(video_file.state):
+        raise RuntimeError("動画のGemini処理に失敗しました。別の動画で試してください。")
+    return [video_file, VIDEO_PROMPT], video_file
+
+
+def analyze_video(video_path: str, mime_type: str, override_date: str = "") -> dict:
+    """動画ファイルを Gemini で解析して merge_results 済み dict を返す。
+
+    ≤ 15 MB: インライン送信（Files API スキップ）で高速化
+    > 15 MB: Files API upload → polling → generate_content
     """
     client = _make_client()
     video_file = None
     try:
-        video_file = client.files.upload(file=video_path)
-
-        # Files API 処理完了を待機（最大 90 秒 = 30回 × 3秒）
-        for _ in range(30):
-            if "PROCESSING" not in str(video_file.state):
-                break
-            time.sleep(3)
-            video_file = client.files.get(name=video_file.name)
-
-        if "FAILED" in str(video_file.state):
-            raise RuntimeError("動画のGemini処理に失敗しました。別の動画で試してください。")
-
-        response_text = _generate_with_chain(client, [video_file, VIDEO_PROMPT])
+        contents, video_file = _build_video_contents(client, video_path, mime_type)
+        response_text = _generate_with_chain(client, contents)
         raw = extract_json(response_text)
 
         summary = {
@@ -606,33 +633,6 @@ def _analyze_video_worker(video_path: str, mime_type: str, override_date: str) -
                 client.files.delete(name=video_file.name)
             except Exception:
                 pass
-
-
-# upload + polling + generate の合計タイムアウト（秒）
-# _GEMINI_CALL_TIMEOUT(=180) より大きく Gunicorn timeout(=300) より小さい値にする
-_VIDEO_TOTAL_TIMEOUT = 240
-
-
-def analyze_video(video_path: str, mime_type: str, override_date: str = "") -> dict:
-    """MP4動画ファイルを Gemini Files API で解析して merge_results 済み dict を返す。
-
-    video_path: 呼び出し元がディスクに保存済みのファイルパス（削除は呼び出し元が行う）
-    override_date が指定された場合、AIが読んだ日付より優先して使用する。
-
-    内部処理（upload → polling → generate_content）全体を _VIDEO_TOTAL_TIMEOUT 秒で打ち切る。
-    これにより sync ワーカーでも Gunicorn WORKER TIMEOUT の前に制御が返る。
-    """
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    fut = executor.submit(_analyze_video_worker, video_path, mime_type, override_date)
-    try:
-        return fut.result(timeout=_VIDEO_TOTAL_TIMEOUT)
-    except concurrent.futures.TimeoutError:
-        raise RuntimeError(
-            f"動画解析が {_VIDEO_TOTAL_TIMEOUT} 秒以内に完了しませんでした。"
-            "動画が長すぎるか Gemini API が混雑しています。しばらくしてから再試行してください。"
-        )
-    finally:
-        executor.shutdown(wait=False)
 
 # ──────────────────────────────────────────────────────────────
 # 数値変換・表示ユーティリティ
