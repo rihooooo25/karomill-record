@@ -815,11 +815,12 @@
       geminiOut.style.display = 'none';
       btnReset.style.display = 'none';
       const sizeMB = (selectedVideo.size / 1024 / 1024).toFixed(1);
-      setLoading(true, `動画アップロード中… (${sizeMB}MB) しばらくお待ちください`);
+      setLoading(true, `動画アップロード中… (${sizeMB}MB) AI解析まで最大4〜5分かかる場合があります`);
       const fd = new FormData();
       fd.append('video', selectedVideo);
       fd.append('date', getSelectedDateMD());
-      const json = await postForm('/upload-video', fd);
+      // 動画は upload + Gemini 処理が長いため 270 秒（サーバー側 240s より余裕をもたせる）
+      const json = await postForm('/upload-video', fd, 270_000);
       setLoading(false);
       showResult(json);
     });
@@ -834,16 +835,43 @@
     // ════════════════════════════════════════
     // 共通ユーティリティ
     // ════════════════════════════════════════
-    async function postForm(url, formData) {
+
+    /**
+     * postForm — タイムアウト付き fetch ラッパー
+     * @param {string}   url          送信先パス
+     * @param {FormData} formData     送信データ
+     * @param {number}   timeoutMs    タイムアウト（ミリ秒）。省略時 90000ms（90 秒）
+     */
+    async function postForm(url, formData, timeoutMs = 90_000) {
+      const controller = new AbortController();
+      const timerId = setTimeout(() => controller.abort('timeout'), timeoutMs);
       try {
-        const resp = await fetch(url, { method: 'POST', body: formData });
+        const resp = await fetch(url, {
+          method: 'POST',
+          body: formData,
+          signal: controller.signal,
+        });
         const ct = resp.headers.get('content-type') || '';
         if (ct.includes('application/json')) return await resp.json();
         const text = await resp.text();
         console.error('Non-JSON response:', text);
-        return { success: false, error: `サーバーエラー (HTTP ${resp.status})。再送してください。` };
+        return { success: false, error: `サーバーエラー (HTTP ${resp.status})。しばらくして再試行してください。` };
       } catch (err) {
-        return { success: false, error: 'ネットワークエラー: ' + err.message };
+        if (err.name === 'AbortError' || controller.signal.reason === 'timeout') {
+          return {
+            success: false,
+            error: '⏱ サーバーの処理時間が上限を超えました。動画を短くするか、しばらく時間をおいて再試行してください。',
+          };
+        }
+        // "Failed to fetch" = TCP接続がサーバー側から切られた（処理中にサーバーが再起動等）
+        console.error('fetch error:', err);
+        return {
+          success: false,
+          error: 'サーバーとの通信が途切れました。ページを再読み込みして再試行してください。\n' +
+                 '（動画が大きい場合はしばらく時間をおいてから試してください）',
+        };
+      } finally {
+        clearTimeout(timerId);
       }
     }
 
