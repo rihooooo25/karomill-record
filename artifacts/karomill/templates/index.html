@@ -849,7 +849,12 @@
 
     /**
      * 動画ファイルから等間隔でフレームを JPEG Blob として抽出する。
-     * ブラウザの Video + Canvas API を使用。ライブラリ不要。
+     *
+     * Android Chrome では async/await + seeked を組み合わせると
+     * イベントが正しく捕捉されないケースがある。
+     * そのため「seeked → キャプチャ → 次のシーク」をコールバック連鎖で実装し、
+     * 各フレームに独立したタイムアウト（10 秒）を設ける。
+     * タイムアウト時は現在のフレームを強制キャプチャして次へ進む（エラーにしない）。
      *
      * @param {File}   videoFile
      * @param {object} opts
@@ -860,59 +865,87 @@
      */
     function extractVideoFrames(videoFile, { maxFrames = 40, maxWidth = 720, quality = 0.75 } = {}) {
       return new Promise((resolve, reject) => {
-        const video = document.createElement('video');
-        video.muted = true;
+        const video      = document.createElement('video');
+        video.muted      = true;
         video.playsInline = true;
-        const objUrl = URL.createObjectURL(videoFile);
+        const objUrl     = URL.createObjectURL(videoFile);
+        const canvas     = document.createElement('canvas');
+        const ctx        = canvas.getContext('2d');
 
-        video.addEventListener('loadedmetadata', async () => {
-          try {
-            const duration = video.duration;
-            if (!duration || !isFinite(duration)) throw new Error('動画の長さを取得できませんでした');
+        let timestamps   = [];
+        let idx          = 0;
+        let capturing    = false;   // 二重キャプチャ防止フラグ
+        let seekTimer    = null;
+        let started      = false;   // loadedmetadata/canplay 二重起動防止
 
-            // 1 秒ごとに抽出、ただし maxFrames を超えないよう間隔を調整
-            const interval = Math.max(1, duration / maxFrames);
-            const timestamps = [];
-            for (let t = 0; t < duration - 0.05; t += interval) {
-              timestamps.push(parseFloat(t.toFixed(3)));
-            }
+        /** 後始末して resolve/reject する */
+        const finish = () => {
+          clearTimeout(seekTimer);
+          video.src = '';  // 参照解放
+          URL.revokeObjectURL(objUrl);
+          if (frames.length > 0) resolve(frames);
+          else reject(new Error('フレームを抽出できませんでした'));
+        };
 
-            const canvas = document.createElement('canvas');
-            const ctx    = canvas.getContext('2d');
-            const frames = [];
+        const frames = [];
 
-            for (const t of timestamps) {
-              video.currentTime = t;
-              // seeked イベントを待つ
-              await new Promise((res, rej) => {
-                const tid = setTimeout(() => rej(new Error('シークタイムアウト')), 5000);
-                video.addEventListener('seeked', () => { clearTimeout(tid); res(); }, { once: true });
-                video.addEventListener('error',  () => { clearTimeout(tid); rej(new Error('動画エラー')); }, { once: true });
-              });
+        /** idx フレームへシークを開始し、タイムアウトタイマーを仕掛ける */
+        const seekToNext = () => {
+          if (idx >= timestamps.length) { finish(); return; }
+          clearTimeout(seekTimer);
+          seekTimer = setTimeout(() => {
+            // タイムアウト: エラーにせず現在の画面を強制キャプチャして次へ
+            captureAndAdvance();
+          }, 10_000);
+          video.currentTime = timestamps[idx];
+        };
 
-              const sw = video.videoWidth  || 1;
-              const sh = video.videoHeight || 1;
-              const scale    = Math.min(1, maxWidth / sw);
-              canvas.width   = Math.round(sw * scale);
-              canvas.height  = Math.round(sh * scale);
-              ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        /** 現在のフレームをキャプチャして次のシークへ */
+        const captureAndAdvance = () => {
+          if (capturing) return;   // seeked が複数回発火しても1回だけ処理
+          capturing = true;
+          clearTimeout(seekTimer);
 
-              const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', quality));
-              if (blob) frames.push(blob);
-            }
+          const sw    = video.videoWidth  || canvas.width  || 360;
+          const sh    = video.videoHeight || canvas.height || 780;
+          const scale = Math.min(1, maxWidth / sw);
+          canvas.width  = Math.round(sw * scale);
+          canvas.height = Math.round(sh * scale);
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
+          canvas.toBlob(blob => {
+            if (blob) frames.push(blob);
+            capturing = false;
+            idx++;
+            seekToNext();
+          }, 'image/jpeg', quality);
+        };
+
+        /** 動画が再生可能になったらフレーム抽出を開始 */
+        const startExtraction = () => {
+          if (started) return;
+          started = true;
+          const duration = video.duration;
+          if (!duration || !isFinite(duration)) {
             URL.revokeObjectURL(objUrl);
-            if (frames.length === 0) throw new Error('フレームを1枚も抽出できませんでした');
-            resolve(frames);
-          } catch (e) {
-            URL.revokeObjectURL(objUrl);
-            reject(e);
+            reject(new Error('動画の長さを取得できませんでした。ファイルが壊れていないか確認してください。'));
+            return;
           }
-        });
+          const interval = Math.max(1, duration / maxFrames);
+          for (let t = 0; t < duration - 0.05; t += interval) {
+            timestamps.push(Math.round(t * 1000) / 1000);
+          }
+          video.addEventListener('seeked', captureAndAdvance);
+          seekToNext();
+        };
+
+        // loadedmetadata と canplay の両方で受ける（Android では後者が先に来る場合あり）
+        video.addEventListener('loadedmetadata', startExtraction, { once: true });
+        video.addEventListener('canplay',        startExtraction, { once: true });
 
         video.addEventListener('error', () => {
           URL.revokeObjectURL(objUrl);
-          reject(new Error('動画ファイルを読み込めませんでした'));
+          reject(new Error('動画ファイルを読み込めませんでした。対応していない形式の可能性があります。'));
         });
 
         video.src = objUrl;
