@@ -819,7 +819,7 @@
       setLoading(true, '動画からフレームを抽出中…');
       let frames;
       try {
-        frames = await extractVideoFrames(selectedVideo, { maxFrames: 40, maxWidth: 720, quality: 0.75 });
+        frames = await extractVideoFrames(selectedVideo, { maxFrames: 20, maxWidth: 540, quality: 0.70 });
       } catch (e) {
         setLoading(false);
         btnSendVideo.disabled = false;
@@ -842,7 +842,7 @@
       }
 
       // ── Step 3: 完了までポーリング（3秒おき・最大 2 分）
-      const result = await pollJobStatus(startResp.job_id, 120_000);
+      const result = await pollJobStatus(startResp.job_id, 180_000);
       setLoading(false);
       showResult(result);
     });
@@ -982,7 +982,7 @@
 
       return {
         success: false,
-        error: '⏱ 処理が 2 分以内に完了しませんでした。しばらく時間をおいて再試行してください。',
+        error: '⏱ 処理が 3 分以内に完了しませんでした。しばらく時間をおいて再試行してください。',
       };
     }
 
